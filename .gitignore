@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+# NEVER COMMIT REAL DATA.
+#
+# kpi-raw/    holds fetched PR bodies, review comments and author identities.
+# kpi-reports/ holds per-person metrics and quality scores.
+#
+# Both are performance-review-adjacent data about identifiable colleagues, and
+# both are ignored wholesale. Synthetic, publishable examples live in samples/.
+# ---------------------------------------------------------------------------
+kpi-raw/
+kpi-reports/
+
+# Anything else that looks like collected data
+*-summary.json
+*.local.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
