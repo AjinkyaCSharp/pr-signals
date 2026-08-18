@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team report - Team Alpha - 2026-05 to 2026-07 (quarter)</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --baseline:  #c3c2b7;
+    --border:    rgba(11,11,11,0.10);
+    --accent:    #2a78d6;
+    --good:      #0ca30c;
+    --warning:   #fab219;
+    --serious:   #ec835a;
+    --critical:  #d03b3b;
+    --delta-good: #006300;
+    --delta-bad:  #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --muted:     #898781;
+      --grid:      #2c2c2a;
+      --baseline:  #383835;
+      --border:    rgba(255,255,255,0.10);
+      --accent:    #3987e5;
+      --delta-good: #0ca30c;
+      --delta-bad:  #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --grid:      #2c2c2a;
+    --baseline:  #383835;
+    --border:    rgba(255,255,255,0.10);
+    --accent:    #3987e5;
+    --delta-good: #0ca30c;
+    --delta-bad:  #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 40px 28px 80px; }
+
+  header.report { border-bottom: 2px solid var(--ink); padding-bottom: 22px; margin-bottom: 32px; }
+  .eyebrow {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 10px;
+  }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; font-weight: 650; }
+  .subject { font-size: 17px; color: var(--ink-2); margin: 0; }
+  .stamp { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+
+  /* hero - exactly one per report */
+  .hero {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 22px;
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 24px 26px; margin-bottom: 28px;
+  }
+  .hero-value { font-size: 56px; font-weight: 650; line-height: 1; margin: 0; }
+  .hero-label { font-size: 15px; color: var(--ink-2); margin: 0; }
+  .hero-note { flex-basis: 100%; font-size: 13px; color: var(--muted); margin: 4px 0 0; max-width: 74ch; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 34px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); padding: 16px 18px; }
+  .tile-label { font-size: 13px; color: var(--ink-2); margin: 0 0 6px; }
+  .tile-value { font-size: 30px; font-weight: 650; line-height: 1.1; margin: 0; }
+  .tile-note { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+
+  .delta { font-size: 12px; margin: 6px 0 0; font-weight: 600; }
+  .delta-good { color: var(--delta-good); }
+  .delta-bad  { color: var(--delta-bad); }
+  .delta-flat { color: var(--muted); font-weight: 500; }
+
+  h2 {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-2); margin: 38px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--baseline);
+  }
+  h3 { font-size: 16px; margin: 0 0 10px; font-weight: 650; }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 20px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .scroll { overflow-x: auto; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  thead th {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+    font-weight: 700; border-bottom: 1px solid var(--baseline); white-space: nowrap;
+  }
+  tbody th { font-weight: 500; color: var(--ink-2); }
+  td.num, .metrics td { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .metrics td.num { font-weight: 600; }
+  td.trend { width: 1%; white-space: nowrap; }
+  td.trend .delta { margin: 0; }
+  td.title { min-width: 260px; max-width: 380px; }
+  td.title a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+  td.title .sub { display: block; font-size: 11px; color: var(--muted); }
+  td.title .chips { display: block; margin-top: 5px; }
+  td.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  td.person { min-width: 210px; font-weight: 600; }
+  td.person .sub { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+  tbody tr:hover { background: var(--surface); }
+
+  .chip {
+    display: inline-block; font-size: 11px; font-weight: 650; line-height: 1.6;
+    padding: 1px 8px; margin: 0 4px 4px 0; border: 1px solid; border-radius: 2px; white-space: nowrap;
+  }
+  .chip-good     { color: var(--ink); border-color: var(--good); }
+  .chip-warning  { color: var(--ink); border-color: var(--warning); }
+  .chip-serious  { color: var(--ink); border-color: var(--serious); }
+  .chip-critical { color: var(--ink); border-color: var(--critical); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); padding: 18px 20px; margin-bottom: 14px; }
+  .card ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
+  .cat { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
+  .card blockquote {
+    margin: 6px 0 4px; padding: 0 0 0 14px; border-left: 3px solid var(--baseline);
+    font-size: 15px; color: var(--ink);
+  }
+  .attrib { font-size: 12px; color: var(--muted); margin: 0; }
+
+  .flag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+  .empty { color: var(--muted); font-size: 14px; font-style: italic; }
+
+  .talking-points {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    padding: 18px 20px; margin: 0; font: inherit; font-size: 15px; white-space: pre-wrap;
+  }
+
+  .callout {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--warning);
+    padding: 14px 18px; font-size: 13px; color: var(--ink-2); margin: 0 0 24px; max-width: 82ch;
+  }
+  .callout-info { border-left-color: var(--accent); }
+  .callout strong { color: var(--ink); }
+
+  footer.report { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--baseline); font-size: 12px; color: var(--muted); max-width: 82ch; }
+  footer.report p { margin: 0 0 8px; }
+
+  @media print {
+    :root { color-scheme: light; }
+    body { background: #fff; }
+    .wrap { max-width: none; padding: 0; }
+    .card, .tile, .hero, section { break-inside: avoid; }
+    tbody tr:hover { background: transparent; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="report">
+    <p class="eyebrow">Team PR / KPI report</p>
+    <h1>Team Alpha</h1>
+    <p class="subject">2026-05 to 2026-07 (quarter) &middot; 3 members &middot; months covered: 2026-05, 2026-06, 2026-07</p>
+    <p class="stamp">Generated 2026-08-18 17:15 &middot; Trends compare against the previous quarter (2026-02 to 2026-04).</p>
+  </header>
+
+  <div class="hero">
+    <p class="hero-value">69.9</p>
+    <div>
+      <p class="hero-label">Team composite score, out of 100</p>
+      <p class="delta delta-bad">&#9660; 1.7 vs previous quarter &middot; worse</p>
+    </div>
+    <p class="hero-note">Computed from the team's pooled totals, not by averaging individual scores. It is a conversation starter for a retro, not a rating of the team or anyone in it.</p>
+  </div>
+
+  <section>
+    <h2>Team performance</h2>
+    <div class="tiles">
+      <div class="tile"><p class="tile-label">PRs raised</p><p class="tile-value">17</p><p class="tile-note">across 3 of 3 members</p><p class="delta delta-good">&#9650; 11 vs previous quarter &middot; better</p></div>
+<div class="tile"><p class="tile-label">Merged to master</p><p class="tile-value">14</p><p class="tile-note">82.4% of PRs raised</p><p class="delta delta-bad">&#9660; 0.9pp vs previous quarter &middot; worse</p></div>
+<div class="tile"><p class="tile-label">Median cycle time</p><p class="tile-value">23 h</p><p class="tile-note">64.1 h average</p><p class="delta delta-flat">no change vs previous quarter</p></div>
+<div class="tile"><p class="tile-label">Threads resolved</p><p class="tile-value">57.1%</p><p class="tile-note">8 of 14 threads</p><p class="delta delta-bad">&#9660; 2.9pp vs previous quarter &middot; worse</p></div>
+<div class="tile"><p class="tile-label">Review comments</p><p class="tile-value">26</p><p class="tile-note">avg 1.5 per PR</p><p class="delta delta-flat">no change vs previous quarter</p></div>
+<div class="tile"><p class="tile-label">Governance flags</p><p class="tile-value">3</p><p class="tile-note">self-approvals + no-approval merges</p><p class="delta delta-bad">&#9650; 2 vs previous quarter &middot; worse</p></div>
+    </div>
+  </section>
+
+  <section class="grid-2">
+    <div>
+      <h2>Delivery</h2>
+      <table class="metrics"><tbody><tr><th scope="row">PRs raised</th><td class="num">17</td><td class="trend"><p class="delta delta-good">&#9650; 11 vs previous quarter &middot; better</p></td></tr>
+<tr><th scope="row">Merged to master</th><td class="num">14 (82.4%)</td><td class="trend"><p class="delta delta-bad">&#9660; 0.9pp vs previous quarter &middot; worse</p></td></tr>
+<tr><th scope="row">Abandoned</th><td class="num">0 (0%)</td><td class="trend"><p class="delta delta-flat">no change vs previous quarter</p></td></tr>
+<tr><th scope="row">Avg cycle time</th><td class="num">64.1 h</td><td class="trend"><p class="delta delta-bad">&#9650; 2.7h vs previous quarter &middot; worse</p></td></tr></tbody></table>
+    </div>
+    <div>
+      <h2>Review culture</h2>
+      <table class="metrics"><tbody><tr><th scope="row">Review threads</th><td class="num">14</td><td class="trend"></td></tr>
+<tr><th scope="row">Threads resolved</th><td class="num">8 (57.1%)</td><td class="trend"><p class="delta delta-bad">&#9660; 2.9pp vs previous quarter &middot; worse</p></td></tr>
+<tr><th scope="row">Comments per PR</th><td class="num">1.5</td><td class="trend"><p class="delta delta-flat">no change vs previous quarter</p></td></tr>
+<tr><th scope="row">PRs with a comment flag</th><td class="num">35.3%</td><td class="trend"><p class="delta delta-bad">&#9650; 2pp vs previous quarter &middot; worse</p></td></tr></tbody></table>
+    </div>
+    <div>
+      <h2>PR &amp; commit hygiene</h2>
+      <table class="metrics"><tbody><tr><th scope="row">Missing work item link</th><td class="num">6 (35.3%)</td><td class="trend"><p class="delta delta-bad">&#9650; 2pp vs previous quarter &middot; worse</p></td></tr>
+<tr><th scope="row">Incomplete / stale description</th><td class="num">6 (35.3%)</td><td class="trend"><p class="delta delta-bad">&#9650; 2pp vs previous quarter &middot; worse</p></td></tr>
+<tr><th scope="row">Large / risky-to-review PRs</th><td class="num">0 (0%)</td><td class="trend"><p class="delta delta-flat">no change vs previous quarter</p></td></tr>
+<tr><th scope="row">Avg churn per PR</th><td class="num">122.4</td><td class="trend"><p class="delta delta-bad">&#9650; 4.9 vs previous quarter &middot; worse</p></td></tr>
+<tr><th scope="row">Vague commit messages</th><td class="num">18 of 34 (52.9%)</td><td class="trend"><p class="delta delta-bad">&#9650; 2.9pp vs previous quarter &middot; worse</p></td></tr></tbody></table>
+    </div>
+    <div>
+      <h2>Governance risk</h2>
+      <table class="metrics"><tbody><tr><th scope="row">Author approved their own PR</th><td class="num">3 (17.6%)</td><td class="trend"><p class="delta delta-bad">&#9650; 0.9pp vs previous quarter &middot; worse</p></td></tr>
+<tr><th scope="row">Merged with no approving reviewer</th><td class="num">0 (0% of merges)</td><td class="trend"><p class="delta delta-flat">no change vs previous quarter</p></td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Workload spread</h2>
+    <p class="callout callout-info">Spread is a <strong>planning signal, not a performance one</strong>. A member with few PRs may be on large tickets, on support, mentoring, or on leave. Use this to ask where the work is concentrated and whether that is a risk if someone is away &mdash; not to compare people.</p>
+    <table class="metrics"><tbody><tr><th scope="row">Members who raised at least one PR</th><td class="num">3 of 3</td><td class="trend"></td></tr>
+<tr><th scope="row">PRs per member - lowest</th><td class="num">2</td><td class="trend"></td></tr>
+<tr><th scope="row">PRs per member - median</th><td class="num">6</td><td class="trend"></td></tr>
+<tr><th scope="row">PRs per member - highest</th><td class="num">9</td><td class="trend"></td></tr>
+<tr><th scope="row">Share held by the busiest member</th><td class="num">52.9%</td><td class="trend"></td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>Per member</h2>
+    <p class="callout callout-info">Listed <strong>alphabetically, deliberately</strong>. Sorting this table by PR count or score turns it into a ranking, and PR counts measure ticket sizing far more than they measure contribution. Each person's own report holds the detail and the review comments behind these numbers.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Member</th><th>Months with data</th><th>PRs raised</th><th>Merged</th>
+          <th>Median cycle h</th><th>Comments</th><th>Avg score</th><th>Flags</th>
+        </tr></thead>
+        <tbody><tr><td class="person">Jane Doe<span class="sub">jane.doe@example.com</span></td><td class="num">3</td><td class="num">9</td><td class="num">6</td><td class="num">71 h</td><td class="num">12</td><td class="num">57.8</td><td><span class="chip chip-critical">&#9650; 3 self-approved</span><span class="chip chip-serious">&#9670; 9 vague commits</span></td></tr>
+<tr><td class="person">Mia Chen<span class="sub">mia.chen@example.com</span></td><td class="num">2</td><td class="num">2</td><td class="num">2</td><td class="num">23 h</td><td class="num">2</td><td class="num">100</td><td></td></tr>
+<tr><td class="person">Raj Patel<span class="sub">raj.patel@example.com</span></td><td class="num">3</td><td class="num">6</td><td class="num">6</td><td class="num">71 h</td><td class="num">12</td><td class="num">77</td><td><span class="chip chip-serious">&#9670; 9 vague commits</span></td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Governance flags across the team</h2>
+    <div class="scroll"><table><thead><tr><th>PR</th><th>Title</th><th>Author</th><th>Month</th><th>Flag</th></tr></thead><tbody><tr><td class="num">505</td><td class="title"><a href="https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/102">wip</a></td><td>jane.doe@example.com</td><td>2026-05</td><td><span class="chip chip-critical">&#9650; self-approved</span></td></tr>
+<tr><td class="num">508</td><td class="title"><a href="https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/102">wip</a></td><td>jane.doe@example.com</td><td>2026-06</td><td><span class="chip chip-critical">&#9650; self-approved</span></td></tr>
+<tr><td class="num">511</td><td class="title"><a href="https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/102">wip</a></td><td>jane.doe@example.com</td><td>2026-07</td><td><span class="chip chip-critical">&#9650; self-approved</span></td></tr></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Coverage</h2>
+    <p class="callout"><strong>1 member-months have no collected data.</strong> These are counted as missing, not as zero. Collect the raw JSON for them before reading anything into the totals below.</p><ul class="flag-list"><li>mia.chen@example.com &mdash; 2026-06</li></ul>
+  </section>
+
+  <footer class="report">
+    <p><strong>Scope.</strong> Pull requests only. Nothing here sees design work, mentoring, on-call, incident response, support load, or whether the team was pointed at the right problem. A quarter's PR count is not a quarter's contribution.</p>
+    <p><strong>How team rates are built.</strong> Every rate is recomputed from the pooled counts across all members, never averaged from individual rates &mdash; averaging would weight a member with 2 PRs the same as one with 20. Cycle-time figures come from the full pooled list of merged PRs.</p>
+    <p><strong>Handling.</strong> Contains per-person metrics for identifiable colleagues. Keep it out of shared drives and version control. Where you are subject to works-council or co-determination rules, systematic individual productivity data usually needs to be agreed before it is collected.</p>
+  </footer>
+
+</div>
+</body>
+</html>

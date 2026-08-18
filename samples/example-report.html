@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR / KPI report - jane.doe@example.com - 2025-07</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --baseline:  #c3c2b7;
+    --border:    rgba(11,11,11,0.10);
+    --accent:    #2a78d6;
+    --good:      #0ca30c;
+    --warning:   #fab219;
+    --serious:   #ec835a;
+    --critical:  #d03b3b;
+    --delta-good: #006300;
+    --delta-bad:  #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --muted:     #898781;
+      --grid:      #2c2c2a;
+      --baseline:  #383835;
+      --border:    rgba(255,255,255,0.10);
+      --accent:    #3987e5;
+      --delta-good: #0ca30c;
+      --delta-bad:  #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --grid:      #2c2c2a;
+    --baseline:  #383835;
+    --border:    rgba(255,255,255,0.10);
+    --accent:    #3987e5;
+    --delta-good: #0ca30c;
+    --delta-bad:  #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 40px 28px 80px; }
+
+  header.report { border-bottom: 2px solid var(--ink); padding-bottom: 22px; margin-bottom: 32px; }
+  .eyebrow {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 10px;
+  }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; font-weight: 650; }
+  .subject { font-size: 17px; color: var(--ink-2); margin: 0; }
+  .stamp { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+
+  /* hero - exactly one per report */
+  .hero {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 22px;
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 24px 26px; margin-bottom: 28px;
+  }
+  .hero-value { font-size: 56px; font-weight: 650; line-height: 1; margin: 0; }
+  .hero-label { font-size: 15px; color: var(--ink-2); margin: 0; }
+  .hero-note { flex-basis: 100%; font-size: 13px; color: var(--muted); margin: 4px 0 0; max-width: 74ch; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 34px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); padding: 16px 18px; }
+  .tile-label { font-size: 13px; color: var(--ink-2); margin: 0 0 6px; }
+  .tile-value { font-size: 30px; font-weight: 650; line-height: 1.1; margin: 0; }
+  .tile-note { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+
+  .delta { font-size: 12px; margin: 6px 0 0; font-weight: 600; }
+  .delta-good { color: var(--delta-good); }
+  .delta-bad  { color: var(--delta-bad); }
+  .delta-flat { color: var(--muted); font-weight: 500; }
+
+  h2 {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-2); margin: 38px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--baseline);
+  }
+  h3 { font-size: 16px; margin: 0 0 10px; font-weight: 650; }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 20px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .scroll { overflow-x: auto; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  thead th {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+    font-weight: 700; border-bottom: 1px solid var(--baseline); white-space: nowrap;
+  }
+  tbody th { font-weight: 500; color: var(--ink-2); }
+  td.num, .metrics td { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .metrics td.num { font-weight: 600; }
+  td.trend { width: 1%; white-space: nowrap; }
+  td.trend .delta { margin: 0; }
+  td.title { min-width: 260px; max-width: 380px; }
+  td.title a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+  td.title .sub { display: block; font-size: 11px; color: var(--muted); }
+  td.title .chips { display: block; margin-top: 5px; }
+  td.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  tbody tr:hover { background: var(--surface); }
+
+  .chip {
+    display: inline-block; font-size: 11px; font-weight: 650; line-height: 1.6;
+    padding: 1px 8px; margin: 0 4px 4px 0; border: 1px solid; border-radius: 2px; white-space: nowrap;
+  }
+  .chip-good     { color: var(--ink); border-color: var(--good); }
+  .chip-warning  { color: var(--ink); border-color: var(--warning); }
+  .chip-serious  { color: var(--ink); border-color: var(--serious); }
+  .chip-critical { color: var(--ink); border-color: var(--critical); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); padding: 18px 20px; margin-bottom: 14px; }
+  .card ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
+  .cat { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
+  .card blockquote {
+    margin: 6px 0 4px; padding: 0 0 0 14px; border-left: 3px solid var(--baseline);
+    font-size: 15px; color: var(--ink);
+  }
+  .attrib { font-size: 12px; color: var(--muted); margin: 0; }
+
+  .flag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+  .empty { color: var(--muted); font-size: 14px; font-style: italic; }
+
+  .talking-points {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    padding: 18px 20px; margin: 0; font: inherit; font-size: 15px; white-space: pre-wrap;
+  }
+
+  .callout {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--warning);
+    padding: 14px 18px; font-size: 13px; color: var(--ink-2); margin: 0 0 24px; max-width: 82ch;
+  }
+  footer.report { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--baseline); font-size: 12px; color: var(--muted); max-width: 82ch; }
+  footer.report p { margin: 0 0 8px; }
+
+  @media print {
+    :root { color-scheme: light; }
+    body { background: #fff; }
+    .wrap { max-width: none; padding: 0; }
+    .card, .tile, .hero, section { break-inside: avoid; }
+    tbody tr:hover { background: transparent; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="report">
+    <p class="eyebrow">PR / KPI report</p>
+    <h1>jane.doe@example.com</h1>
+    <p class="subject">2025-07 &middot; pull requests raised in this month</p>
+    <p class="stamp">Generated 2026-08-18 16:53 &middot; No prior month found in this folder, so no trends yet. They appear once a second month has been generated for this person.</p>
+  </header>
+
+  <div class="hero">
+    <p class="hero-value">57.8</p>
+    <div>
+      <p class="hero-label">Composite quality score, out of 100</p>
+      
+    </div>
+    <p class="hero-note">A conversation starter, not a rating. The weights are one team's opinion and every input is gameable by anyone who knows the formula. Read the trend against this person's own last month; never rank two people with it.</p>
+  </div>
+
+  <section>
+    <h2>Headline</h2>
+    <div class="tiles">
+      <div class="tile"><p class="tile-label">PRs raised</p><p class="tile-value">3</p></div>
+<div class="tile"><p class="tile-label">Merged to master</p><p class="tile-value">2</p><p class="tile-note">66.7% of PRs raised</p></div>
+<div class="tile"><p class="tile-label">Median cycle time</p><p class="tile-value">71 h</p><p class="tile-note">71 h average</p></div>
+<div class="tile"><p class="tile-label">Threads resolved</p><p class="tile-value">50%</p><p class="tile-note">1 of 2 threads</p></div>
+<div class="tile"><p class="tile-label">Review comments</p><p class="tile-value">4</p><p class="tile-note">avg 1.3 per PR</p></div>
+<div class="tile"><p class="tile-label">Reviewers engaged</p><p class="tile-value">2</p><p class="tile-note">distinct people who commented</p></div>
+    </div>
+  </section>
+
+  <section class="grid-2">
+    <div>
+      <h2>PR hygiene</h2>
+      <table class="metrics"><tbody>
+        <tr><th scope="row">Missing work item link</th><td class="num">1 (33.3%)</td><td class="trend"></td></tr>
+<tr><th scope="row">Incomplete / stale description</th><td class="num">1 (33.3%)</td><td class="trend"></td></tr>
+<tr><th scope="row">PRs with any comment flag</th><td class="num">1 (33.3%)</td><td class="trend"></td></tr>
+<tr><th scope="row">Abandoned PRs</th><td class="num">0 (0%)</td><td class="trend"></td></tr>
+      </tbody></table>
+    </div>
+    <div>
+      <h2>Size &amp; risk</h2>
+      <table class="metrics"><tbody>
+        <tr><th scope="row">Lines added / deleted</th><td class="num">+240 / -95</td><td class="trend"></td></tr>
+<tr><th scope="row">Files changed</th><td class="num">8</td><td class="trend"></td></tr>
+<tr><th scope="row">Avg churn per PR</th><td class="num">111.7</td><td class="trend"></td></tr>
+<tr><th scope="row">Large PRs (churn &gt;= 400 or files &gt;= 15)</th><td class="num">0 (0%)</td><td class="trend"></td></tr>
+      </tbody></table>
+    </div>
+    <div>
+      <h2>Review governance</h2>
+      <table class="metrics"><tbody>
+        <tr><th scope="row">Author approved their own PR</th><td class="num">1 (33.3%)</td><td class="trend"></td></tr>
+<tr><th scope="row">Merged to master with no approving reviewer</th><td class="num">0 (0% of merges)</td><td class="trend"></td></tr>
+      </tbody></table>
+    </div>
+    <div>
+      <h2>Commit hygiene</h2>
+      <table class="metrics"><tbody>
+        <tr><th scope="row">Total commits</th><td class="num">5</td><td class="trend"></td></tr>
+<tr><th scope="row">Vague / non-descriptive messages</th><td class="num">3 (60%)</td><td class="trend"></td></tr>
+<tr><th scope="row">Avg rework commits after first review comment</th><td class="num">1</td><td class="trend"></td></tr>
+      </tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Pull requests</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>PR</th><th>Title &amp; flags</th><th>Status</th><th>Merged</th><th>Cycle h</th>
+          <th>Comments / threads</th><th>Files</th><th>Lines</th><th>Approvals</th>
+          <th>Commits</th><th>Rework</th>
+        </tr></thead>
+        <tbody>
+          <tr><td class="num">101</td><td class="title"><a href="https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/101">Fix order export bug</a><span class="sub">refs/heads/master</span></td><td>completed</td><td>yes</td><td class="num">23</td><td class="num">1 / 1</td><td class="num">2</td><td class="num">+30 / -5</td><td class="num">1 / 1</td><td class="num">2</td><td class="num">0</td></tr>
+<tr><td class="num">102</td><td class="title"><a href="https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/102">wip</a><span class="sub">refs/heads/master</span><span class="chips"><span class="chip chip-warning">&#9679; stale description</span><span class="chip chip-warning">&#9679; no work item</span><span class="chip chip-serious">&#9670; 3 vague commits</span><span class="chip chip-critical">&#9650; self-approved</span></span></td><td>completed</td><td>yes</td><td class="num">119</td><td class="num">3 / 1</td><td class="num">6</td><td class="num">+210 / -90</td><td class="num">2 / 2</td><td class="num">3</td><td class="num">2</td></tr>
+<tr><td class="num">103</td><td class="title"><a href="https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/103">Add report caching</a><span class="sub">refs/heads/feature/report-caching</span></td><td>active</td><td>no</td><td class="num">n/a</td><td class="num">0 / 0</td><td class="num">0</td><td class="num">+0 / -0</td><td class="num">0 / 0</td><td class="num">0</td><td class="num">n/a</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Confirmed talking points</h2>
+    <p class="empty">Not yet written. After the manual review pass (RUNBOOK.md Step 4), save the confirmed points to a text file and re-run with <code>-TalkingPointsPath</code>.</p>
+  </section>
+
+  <section>
+    <h2>Candidate flags &mdash; not yet confirmed</h2>
+    <p class="callout">Everything below this line is keyword matching, not judgment. Read each one in its original context before raising it: a comment saying "add a null check" may be a recurring blind spot or a one-off on genuinely subtle code, and the script cannot tell those apart. Discard the false positives before the meeting.</p>
+
+    <h3>Review comments</h3>
+    <article class="card"><h3>PR #102 &mdash; wip</h3><ul><li><span class="cat">Null check</span><blockquote>Please add a null check here before dereferencing customer.Address</blockquote><p class="attrib">thread 2, by John Reviewer</p></li><li><span class="cat">Naming convention</span><blockquote>Also this variable name is confusing, please rename it per naming convention.</blockquote><p class="attrib">thread 2, by John Reviewer</p></li></ul></article>
+
+    <h3>Vague / non-descriptive commit messages</h3>
+    <div class="scroll"><table><thead><tr><th>PR</th><th>Title</th><th>Commit</th><th>Message</th></tr></thead><tbody><tr><td class="num">#102</td><td>wip</td><td class="mono">c3d4e5f6</td><td>wip</td></tr>
+<tr><td class="num">#102</td><td>wip</td><td class="mono">d4e5f6a7</td><td>fixed pr comments</td></tr>
+<tr><td class="num">#102</td><td>wip</td><td class="mono">e5f6a7b8</td><td>fixed unit tests</td></tr></tbody></table></div>
+
+    <h3>Self-approval and no-approval merges</h3>
+    <ul class="flag-list"><li><span class="chip chip-critical">&#9650; self-approved</span> PR #102 &mdash; wip. jane.doe@example.com appears among the reviewers with an approving vote on their own PR.</li></ul>
+  </section>
+
+  <section>
+    <h2>Comment-flag categories</h2>
+    <table class="metrics"><tbody>
+      <tr><th scope="row">Naming convention</th><td class="num">1</td><td class="trend"></td></tr>
+<tr><th scope="row">Null check</th><td class="num">1</td><td class="trend"></td></tr>
+<tr><th scope="row">Misleading description</th><td class="num">0</td><td class="trend"></td></tr>
+<tr><th scope="row">Stale/incomplete comment</th><td class="num">0</td><td class="trend"></td></tr>
+    </tbody></table>
+  </section>
+
+  <footer class="report">
+    <p><strong>Scope.</strong> This covers pull requests only. Mentoring, design work, on-call, incident response, and whether the person was working on the right thing at all are invisible here. A month with 3 PRs says nothing on its own.</p>
+    <p><strong>Thresholds used.</strong> Large PR at churn &ge; 400 lines or &ge; 15 files. Description flagged under 20 characters. Commit subject flagged as vague under 10 characters or matching the known-phrase list.</p>
+    <p><strong>Handling.</strong> Contains real review comments about an identifiable person. Keep it out of shared drives and version control, and show the report to the person it describes.</p>
+  </footer>
+
+</div>
+</body>
+</html>

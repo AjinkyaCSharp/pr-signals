@@ -10,9 +10,25 @@
 kpi-raw/
 kpi-reports/
 
+# The real team roster holds colleague email addresses. teams.example.json is the
+# committed placeholder; teams.json is yours and stays local.
+teams.json
+
 # Anything else that looks like collected data
 *-summary.json
+*-prs.csv
+*-members.csv
+*-team.html
+kpi-ledger.csv
+team-ledger.csv
+*-talking-points.md
 *.local.json
+
+# ...but the synthetic examples in samples/ are meant to be published
+!samples/example-prs.csv
+!samples/example-ledger.csv
+!samples/example-team-members.csv
+!samples/example-team-report.html
 
 # OS / editor noise
 .DS_Store

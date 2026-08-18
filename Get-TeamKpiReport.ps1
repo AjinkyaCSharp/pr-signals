@@ -81,6 +81,21 @@
     Commit messages (first line) with fewer non-whitespace characters than this are
     flagged as vague, in addition to the known-phrase pattern list. Default 10.
 
+.PARAMETER TalkingPointsPath
+    Optional path to a plain-text/Markdown file holding the confirmed talking points
+    written by the agent during the manual review pass (RUNBOOK.md Step 4). When
+    supplied, its contents are embedded in the HTML report's "Confirmed talking
+    points" section. Re-run the script after writing the file to fold it in.
+
+.OUTPUTS
+    Three files per run, all using a fixed template so every report is identical
+    in shape:
+      <person>-<month>.html          presentation report (open in a browser / project it)
+      <person>-<month>-prs.csv       one row per PR, fixed columns
+      <person>-<month>-summary.json  machine-readable metrics (also drives the trend column)
+    Plus one shared, accumulating file:
+      kpi-ledger.csv                 one row per person-month, re-runs update in place
+
 .EXAMPLE
     .\Get-TeamKpiReport.ps1 -InputJsonPath .\kpi-raw\jane.doe-2025-07.json -OutputDir .\kpi-reports
 #>
@@ -98,10 +113,19 @@ param(
 
     [int]$LargeFileCountThreshold = 15,
 
-    [int]$VagueCommitMinLength = 10
+    [int]$VagueCommitMinLength = 10,
+
+    [string]$TalkingPointsPath
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Force invariant formatting so numbers render as "66.7" in every locale - a
+# decimal comma would corrupt the CSV columns and the HTML figures alike.
+[System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture
+
+# Shared HTML helpers + the one stylesheet every report renders with.
+. (Join-Path $PSScriptRoot 'KpiReportCommon.ps1')
 
 if (-not (Test-Path $InputJsonPath)) {
     throw "Input JSON not found: $InputJsonPath"
@@ -198,15 +222,6 @@ $vagueCommitCount = 0
 $reworkCommitTotal = 0
 $prsWithReworkData = 0
 $vagueCommitHits = New-Object System.Collections.Generic.List[object]
-
-function Get-Median {
-    param([double[]]$Values)
-    if (-not $Values -or $Values.Count -eq 0) { return $null }
-    $sorted = $Values | Sort-Object
-    $n = $sorted.Count
-    if ($n % 2 -eq 1) { return [double]$sorted[[math]::Floor($n / 2)] }
-    return [double](($sorted[$n / 2 - 1] + $sorted[$n / 2]) / 2)
-}
 
 foreach ($pr in $pullRequests) {
     $totalRaised++
@@ -444,7 +459,9 @@ $summary = [pscustomobject]@{
 
 $safePerson = ($person -replace '[^a-zA-Z0-9\.\-_@]', '_')
 $summaryPath = Join-Path $OutputDir "$safePerson-$monthYear-summary.json"
-$mdPath = Join-Path $OutputDir "$safePerson-$monthYear.md"
+$htmlPath    = Join-Path $OutputDir "$safePerson-$monthYear.html"
+$prsCsvPath  = Join-Path $OutputDir "$safePerson-$monthYear-prs.csv"
+$ledgerPath  = Join-Path $OutputDir 'kpi-ledger.csv'
 
 # ---- Month-over-month trend: look for the immediately preceding month's summary for this person ----
 $previousSummary = $null
@@ -459,146 +476,375 @@ try {
 
 $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $summaryPath -Encoding UTF8
 
-# ---- Markdown report ----
-$md = New-Object System.Text.StringBuilder
-[void]$md.AppendLine("# PR / KPI Report - $person ($monthYear)")
-[void]$md.AppendLine()
-[void]$md.AppendLine("Generated: $($summary.generatedAtUtc)")
-[void]$md.AppendLine()
-function Format-Trend {
-    param($Current, $Previous, [switch]$HigherIsBetter, [string]$Suffix = '')
-    if ($null -eq $Previous -or $null -eq $Current) { return '' }
-    $delta = [math]::Round($Current - $Previous, 1)
-    if ($delta -eq 0) { return ' (no change)' }
-    $arrow = if ($delta -gt 0) { '^' } else { 'v' }
-    $good = if ($HigherIsBetter) { $delta -gt 0 } else { $delta -lt 0 }
-    $tag = if ($good) { 'better' } else { 'worse' }
-    return " ($arrow $([math]::Abs($delta))$Suffix vs last month, $tag)"
-}
-
-[void]$md.AppendLine("## Summary")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| Metric | Value | Trend |")
-[void]$md.AppendLine("|---|---|---|")
-[void]$md.AppendLine("| PRs raised | $totalRaised | $(if($previousSummary){"prev: $($previousSummary.totalRaised)"}) |")
-[void]$md.AppendLine("| PRs merged to master | $mergedToMaster | $(if($previousSummary){"prev: $($previousSummary.mergedToMaster)"}) |")
-[void]$md.AppendLine("| Merge rate | $($summary.mergeRatePercent)%$(Format-Trend -Current $summary.mergeRatePercent -Previous $previousSummary.mergeRatePercent -HigherIsBetter -Suffix 'pp') | |")
-[void]$md.AppendLine("| Abandoned PRs | $abandonedCount ($abandonRatePercent%) | |")
-[void]$md.AppendLine("| Avg cycle time (create -> merge) | $(if($avgCycleTimeHours){"$avgCycleTimeHours h"}else{'n/a'})$(Format-Trend -Current $avgCycleTimeHours -Previous $previousSummary.avgCycleTimeHours -Suffix 'h') | |")
-[void]$md.AppendLine("| Median cycle time | $(if($medianCycleTimeHours){"$medianCycleTimeHours h"}else{'n/a'}) | |")
-[void]$md.AppendLine("| Review threads (resolved/total) | $resolvedThreads/$totalThreads ($(if($threadResolutionPercent){"$threadResolutionPercent%"}else{'n/a'})) | |")
-[void]$md.AppendLine("| Total review comments | $totalComments (avg $avgCommentsPerPr / PR)$(Format-Trend -Current $avgCommentsPerPr -Previous $previousSummary.avgCommentsPerPr -Suffix '/PR') | |")
-[void]$md.AppendLine("| Distinct reviewers engaged | $reviewerDiversityCount | |")
-[void]$md.AppendLine("| Missing work item link | $noWorkItemCount ($noWorkItemRatePercent%)$(Format-Trend -Current $noWorkItemRatePercent -Previous $previousSummary.noWorkItemRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine("| Incomplete/stale description | $descriptionFlagCount ($descriptionFlagRatePercent%)$(Format-Trend -Current $descriptionFlagRatePercent -Previous $previousSummary.descriptionFlagRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine("| PRs with any comment flag | ($commentFlagRatePercent%)$(Format-Trend -Current $commentFlagRatePercent -Previous $previousSummary.commentFlagRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine("| **Composite quality score (0-100)** | **$qualityScore**$(Format-Trend -Current $qualityScore -Previous $previousSummary.qualityScore -HigherIsBetter) | |")
-if (-not $previousSummary) {
-    [void]$md.AppendLine()
-    [void]$md.AppendLine("_No prior month summary found in this output folder - trend column will populate once a previous month's report exists._")
-}
-[void]$md.AppendLine()
-[void]$md.AppendLine("### PR size / churn")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| Metric | Value | Trend |")
-[void]$md.AppendLine("|---|---|---|")
-[void]$md.AppendLine("| Total lines added / deleted | +$totalLinesAdded / -$totalLinesDeleted | |")
-[void]$md.AppendLine("| Total files changed | $totalFilesChanged | |")
-[void]$md.AppendLine("| Avg churn per PR (added+deleted) | $avgChurnPerPr$(Format-Trend -Current $avgChurnPerPr -Previous $previousSummary.avgChurnPerPr) | |")
-[void]$md.AppendLine("| Large / risky-to-review PRs (churn >= $LargeChurnThreshold or files >= $LargeFileCountThreshold) | $largePrCount ($largePrRatePercent%)$(Format-Trend -Current $largePrRatePercent -Previous $previousSummary.largePrRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine()
-[void]$md.AppendLine("### Review governance")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| Metric | Value | Trend |")
-[void]$md.AppendLine("|---|---|---|")
-[void]$md.AppendLine("| Self-approval flags (author approved own PR) | $selfApprovalCount ($selfApprovalRatePercent%)$(Format-Trend -Current $selfApprovalRatePercent -Previous $previousSummary.selfApprovalRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine("| Merged to master with no approving reviewer | $noApprovalMergedCount ($noApprovalMergedRatePercent% of merges)$(Format-Trend -Current $noApprovalMergedRatePercent -Previous $previousSummary.noApprovalMergedRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine()
-[void]$md.AppendLine("### Commit hygiene")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| Metric | Value | Trend |")
-[void]$md.AppendLine("|---|---|---|")
-[void]$md.AppendLine("| Total commits | $totalCommits | |")
-[void]$md.AppendLine("| Vague / non-descriptive commit messages | $vagueCommitCount ($vagueCommitRatePercent%)$(Format-Trend -Current $vagueCommitRatePercent -Previous $previousSummary.vagueCommitRatePercent -Suffix 'pp') | |")
-[void]$md.AppendLine("| Avg rework commits after first review comment | $(if($null -ne $avgReworkCommitsPerPr){$avgReworkCommitsPerPr}else{'n/a (no comment timestamps supplied)'})$(if($null -ne $avgReworkCommitsPerPr){Format-Trend -Current $avgReworkCommitsPerPr -Previous $previousSummary.avgReworkCommitsPerPr}) | |")
-[void]$md.AppendLine()
-[void]$md.AppendLine("### Comment-flag category breakdown")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| Category | Count |")
-[void]$md.AppendLine("|---|---|")
-foreach ($cat in $categoryTotals.Keys) {
-    [void]$md.AppendLine("| $cat | $($categoryTotals[$cat]) |")
-}
-[void]$md.AppendLine()
-[void]$md.AppendLine("## Pull Requests")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| # | Title | Status | Target | Merged | Cycle time (h) | Threads | Comments | Desc flag | No work item | Comment flags |")
-[void]$md.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|")
-foreach ($pr in $prResults) {
-    $titleLink = if ($pr.url) { "[$($pr.title)]($($pr.url))" } else { $pr.title }
-    $ct = if ($null -ne $pr.cycleTimeHours) { $pr.cycleTimeHours } else { 'n/a' }
-    [void]$md.AppendLine("| $($pr.pullRequestId) | $titleLink | $($pr.status) | $($pr.targetRefName) | $($pr.mergedToMaster) | $ct | $($pr.threadCount) | $($pr.commentCount) | $($pr.descriptionFlag) | $($pr.noWorkItemFlag) | $($pr.commentFlagCount) |")
-}
-[void]$md.AppendLine()
-[void]$md.AppendLine("### Pull Requests - size, governance & commit hygiene")
-[void]$md.AppendLine()
-[void]$md.AppendLine("| # | Files | +Lines | -Lines | Large PR | Reviewers | Approved | Self-approved | Commits | Vague commits | Rework commits |")
-[void]$md.AppendLine("|---|---|---|---|---|---|---|---|---|---|---|")
-foreach ($pr in $prResults) {
-    $rework = if ($null -ne $pr.reworkCommitCount) { $pr.reworkCommitCount } else { 'n/a' }
-    [void]$md.AppendLine("| $($pr.pullRequestId) | $($pr.filesChangedCount) | +$($pr.linesAdded) | -$($pr.linesDeleted) | $($pr.largePrFlag) | $($pr.reviewersCount) | $($pr.approvedCount) | $($pr.selfApprovalFlag) | $($pr.commitCount) | $($pr.vagueCommitCount) | $rework |")
-}
-[void]$md.AppendLine()
-[void]$md.AppendLine("## Candidate comment flags (heuristic - needs manual confirmation)")
-[void]$md.AppendLine()
-$anyFlags = $false
-foreach ($pr in $prResults) {
-    if ($pr.commentFlags.Count -eq 0) { continue }
-    $anyFlags = $true
-    [void]$md.AppendLine("### PR #$($pr.pullRequestId) - $($pr.title)")
-    foreach ($hit in $pr.commentFlags) {
-        [void]$md.AppendLine("- **$($hit.category)** (thread $($hit.threadId), by $($hit.author)): `"$($hit.snippet)`"")
-    }
-    [void]$md.AppendLine()
-}
-if (-not $anyFlags) {
-    [void]$md.AppendLine("_No keyword-based comment flags found._")
-}
-[void]$md.AppendLine()
-[void]$md.AppendLine("## Vague / non-descriptive commit messages (heuristic - needs manual confirmation)")
-[void]$md.AppendLine()
-if ($vagueCommitHits.Count -eq 0) {
-    [void]$md.AppendLine("_No vague commit messages detected._")
-} else {
-    [void]$md.AppendLine("| PR | Commit | Message |")
-    [void]$md.AppendLine("|---|---|---|")
-    foreach ($hit in $vagueCommitHits) {
-        $shortSha = if ($hit.commitId -and $hit.commitId.Length -gt 8) { $hit.commitId.Substring(0, 8) } else { $hit.commitId }
-        [void]$md.AppendLine("| #$($hit.pullRequestId) - $($hit.title) | $shortSha | `"$($hit.message)`" |")
-    }
-}
-[void]$md.AppendLine()
-[void]$md.AppendLine("## Self-approval / no-approval-merge flags (needs manual confirmation)")
-[void]$md.AppendLine()
 $selfApprovalPrs = @($prResults | Where-Object { $_.selfApprovalFlag })
 $noApprovalPrs = @($prResults | Where-Object { $_.noApprovalMergedFlag })
-if ($selfApprovalPrs.Count -eq 0 -and $noApprovalPrs.Count -eq 0) {
-    [void]$md.AppendLine("_No self-approval or no-approval-merge flags detected._")
-} else {
-    foreach ($pr in $selfApprovalPrs) {
-        [void]$md.AppendLine("- **Self-approved**: PR #$($pr.pullRequestId) - $($pr.title) - $person appears among the reviewers with an approving vote on their own PR.")
-    }
-    foreach ($pr in $noApprovalPrs) {
-        [void]$md.AppendLine("- **Merged without approval**: PR #$($pr.pullRequestId) - $($pr.title) - merged to master with $($pr.reviewersCount) reviewer(s) assigned but 0 approvals.")
+
+# ===========================================================================
+#  CSV OUTPUT 1 - per-PR detail. Fixed column template; one row per PR.
+# ===========================================================================
+$prCsvRows = foreach ($pr in $prResults) {
+    [pscustomobject][ordered]@{
+        person             = $person
+        monthYear          = $monthYear
+        pullRequestId      = $pr.pullRequestId
+        title              = $pr.title
+        url                = $pr.url
+        status             = $pr.status
+        targetRefName      = $pr.targetRefName
+        creationDate       = $pr.creationDate
+        closedDate         = $pr.closedDate
+        mergedToMaster     = $pr.mergedToMaster
+        cycleTimeHours     = $pr.cycleTimeHours
+        workItemCount      = $pr.workItemCount
+        noWorkItemFlag     = $pr.noWorkItemFlag
+        descriptionFlag    = $pr.descriptionFlag
+        threadCount        = $pr.threadCount
+        commentCount       = $pr.commentCount
+        commentFlagCount   = $pr.commentFlagCount
+        filesChangedCount  = $pr.filesChangedCount
+        linesAdded         = $pr.linesAdded
+        linesDeleted       = $pr.linesDeleted
+        churn              = $pr.churn
+        largePrFlag        = $pr.largePrFlag
+        reviewersCount     = $pr.reviewersCount
+        approvedCount      = $pr.approvedCount
+        selfApprovalFlag   = $pr.selfApprovalFlag
+        noApprovalMergedFlag = $pr.noApprovalMergedFlag
+        commitCount        = $pr.commitCount
+        vagueCommitCount   = $pr.vagueCommitCount
+        reworkCommitCount  = $pr.reworkCommitCount
     }
 }
-[void]$md.AppendLine()
-[void]$md.AppendLine("## Confirmed talking points")
-[void]$md.AppendLine()
-[void]$md.AppendLine("_To be filled in by the agent after manually reviewing the candidate flags above and the flagged PR descriptions/work-item links, per RUNBOOK.md Step 4._")
+@($prCsvRows) | Export-Csv -Path $prsCsvPath -NoTypeInformation -Encoding UTF8
 
-$md.ToString() | Set-Content -Path $mdPath -Encoding UTF8
+# ===========================================================================
+#  CSV OUTPUT 2 - rolling ledger, one row per person-month, for record keeping.
+#  Re-running a month replaces that month's row rather than duplicating it.
+# ===========================================================================
+$ledgerColumns = @(
+    'person', 'monthYear', 'generatedAtUtc', 'qualityScore',
+    'totalRaised', 'mergedToMaster', 'mergeRatePercent', 'abandonedCount', 'abandonRatePercent',
+    'avgCycleTimeHours', 'medianCycleTimeHours',
+    'totalThreads', 'resolvedThreads', 'threadResolutionPercent',
+    'totalComments', 'avgCommentsPerPr', 'reviewerDiversityCount',
+    'noWorkItemCount', 'noWorkItemRatePercent',
+    'descriptionFlagCount', 'descriptionFlagRatePercent', 'commentFlagRatePercent',
+    'totalLinesAdded', 'totalLinesDeleted', 'totalFilesChanged', 'avgChurnPerPr',
+    'largePrCount', 'largePrRatePercent',
+    'selfApprovalCount', 'selfApprovalRatePercent',
+    'noApprovalMergedCount', 'noApprovalMergedRatePercent',
+    'totalCommits', 'vagueCommitCount', 'vagueCommitRatePercent', 'avgReworkCommitsPerPr'
+)
+$ledgerRow = [pscustomobject][ordered]@{}
+foreach ($col in $ledgerColumns) {
+    Add-Member -InputObject $ledgerRow -MemberType NoteProperty -Name $col -Value $summary.$col
+}
 
+$ledgerRows = New-Object System.Collections.Generic.List[object]
+if (Test-Path $ledgerPath) {
+    foreach ($existing in @(Import-Csv -Path $ledgerPath)) {
+        # Drop any prior row for this same person+month so a re-run updates in place.
+        if ($existing.person -eq $person -and $existing.monthYear -eq $monthYear) { continue }
+        $ledgerRows.Add($existing) | Out-Null
+    }
+}
+$ledgerRows.Add($ledgerRow) | Out-Null
+$ledgerRows |
+    Select-Object $ledgerColumns |
+    Sort-Object person, monthYear |
+    Export-Csv -Path $ledgerPath -NoTypeInformation -Encoding UTF8
+
+# ===========================================================================
+#  HTML OUTPUT - the presentation report. One fixed template, tokens replaced,
+#  so every report for every person and month has the same shape.
+# ===========================================================================
+
+# ---- headline tiles ----
+$tiles = @(
+    (New-Tile -Label 'PRs raised' -Value "$totalRaised" `
+        -DeltaHtml (New-DeltaHtml -Current $totalRaised -Previous $previousSummary.totalRaised -HigherIsBetter)),
+    (New-Tile -Label 'Merged to master' -Value "$mergedToMaster" -Note "$($summary.mergeRatePercent)% of PRs raised" `
+        -DeltaHtml (New-DeltaHtml -Current $summary.mergeRatePercent -Previous $previousSummary.mergeRatePercent -HigherIsBetter -Suffix 'pp')),
+    (New-Tile -Label 'Median cycle time' -Value (Format-Metric $medianCycleTimeHours ' h') -Note (Format-Metric $avgCycleTimeHours ' h average' 'n/a') `
+        -DeltaHtml (New-DeltaHtml -Current $avgCycleTimeHours -Previous $previousSummary.avgCycleTimeHours -Suffix 'h')),
+    (New-Tile -Label 'Threads resolved' -Value (Format-Metric $threadResolutionPercent '%') -Note "$resolvedThreads of $totalThreads threads" `
+        -DeltaHtml (New-DeltaHtml -Current $threadResolutionPercent -Previous $previousSummary.threadResolutionPercent -HigherIsBetter -Suffix 'pp')),
+    (New-Tile -Label 'Review comments' -Value "$totalComments" -Note "avg $avgCommentsPerPr per PR" `
+        -DeltaHtml (New-DeltaHtml -Current $avgCommentsPerPr -Previous $previousSummary.avgCommentsPerPr -Suffix '/PR')),
+    (New-Tile -Label 'Reviewers engaged' -Value "$reviewerDiversityCount" -Note 'distinct people who commented')
+) -join "`n"
+
+# ---- grouped metric tables ----
+$hygieneRows = @(
+    (New-MetricRow 'Missing work item link' "$noWorkItemCount ($noWorkItemRatePercent%)" (New-DeltaHtml -Current $noWorkItemRatePercent -Previous $previousSummary.noWorkItemRatePercent -Suffix 'pp')),
+    (New-MetricRow 'Incomplete / stale description' "$descriptionFlagCount ($descriptionFlagRatePercent%)" (New-DeltaHtml -Current $descriptionFlagRatePercent -Previous $previousSummary.descriptionFlagRatePercent -Suffix 'pp')),
+    (New-MetricRow 'PRs with any comment flag' "$anyCommentFlagCount ($commentFlagRatePercent%)" (New-DeltaHtml -Current $commentFlagRatePercent -Previous $previousSummary.commentFlagRatePercent -Suffix 'pp')),
+    (New-MetricRow 'Abandoned PRs' "$abandonedCount ($abandonRatePercent%)" '')
+) -join "`n"
+
+$sizeRows = @(
+    (New-MetricRow 'Lines added / deleted' "+$totalLinesAdded / -$totalLinesDeleted" ''),
+    (New-MetricRow 'Files changed' "$totalFilesChanged" ''),
+    (New-MetricRow 'Avg churn per PR' "$avgChurnPerPr" (New-DeltaHtml -Current $avgChurnPerPr -Previous $previousSummary.avgChurnPerPr)),
+    (New-MetricRow "Large PRs (churn >= $LargeChurnThreshold or files >= $LargeFileCountThreshold)" "$largePrCount ($largePrRatePercent%)" (New-DeltaHtml -Current $largePrRatePercent -Previous $previousSummary.largePrRatePercent -Suffix 'pp'))
+) -join "`n"
+
+$govRows = @(
+    (New-MetricRow 'Author approved their own PR' "$selfApprovalCount ($selfApprovalRatePercent%)" (New-DeltaHtml -Current $selfApprovalRatePercent -Previous $previousSummary.selfApprovalRatePercent -Suffix 'pp')),
+    (New-MetricRow 'Merged to master with no approving reviewer' "$noApprovalMergedCount ($noApprovalMergedRatePercent% of merges)" (New-DeltaHtml -Current $noApprovalMergedRatePercent -Previous $previousSummary.noApprovalMergedRatePercent -Suffix 'pp'))
+) -join "`n"
+
+$commitRows = @(
+    (New-MetricRow 'Total commits' "$totalCommits" ''),
+    (New-MetricRow 'Vague / non-descriptive messages' "$vagueCommitCount ($vagueCommitRatePercent%)" (New-DeltaHtml -Current $vagueCommitRatePercent -Previous $previousSummary.vagueCommitRatePercent -Suffix 'pp')),
+    (New-MetricRow 'Avg rework commits after first review comment' (Format-Metric $avgReworkCommitsPerPr '' 'n/a (no comment timestamps supplied)') (New-DeltaHtml -Current $avgReworkCommitsPerPr -Previous $previousSummary.avgReworkCommitsPerPr))
+) -join "`n"
+
+$categoryRows = (@(foreach ($cat in $categoryTotals.Keys) {
+    New-MetricRow $cat "$($categoryTotals[$cat])" ''
+}) -join "`n")
+
+# ---- per-PR table ----
+$prRows = (@(foreach ($pr in $prResults) {
+    $titleText = ConvertTo-HtmlText $pr.title
+    $titleCell = if ($pr.url) { '<a href="' + (ConvertTo-HtmlText $pr.url) + '">' + $titleText + '</a>' } else { $titleText }
+    $chips = ''
+    if ($pr.descriptionFlag)      { $chips += (New-Chip 'warning'  'stale description') }
+    if ($pr.noWorkItemFlag)       { $chips += (New-Chip 'warning'  'no work item') }
+    if ($pr.largePrFlag)          { $chips += (New-Chip 'warning'  'large PR') }
+    if ($pr.vagueCommitCount -gt 0) { $chips += (New-Chip 'serious' "$($pr.vagueCommitCount) vague commits") }
+    if ($pr.selfApprovalFlag)     { $chips += (New-Chip 'critical' 'self-approved') }
+    if ($pr.noApprovalMergedFlag) { $chips += (New-Chip 'critical' 'no approval') }
+    # Flags ride under the title rather than in a far-right column: in a wide table
+    # that column lands off-screen, which hides the one thing worth reading.
+    $chipLine = if ($chips) { '<span class="chips">' + $chips + '</span>' } else { '' }
+
+    $cycle  = if ($null -ne $pr.cycleTimeHours) { "$($pr.cycleTimeHours)" } else { 'n/a' }
+    $rework = if ($null -ne $pr.reworkCommitCount) { "$($pr.reworkCommitCount)" } else { 'n/a' }
+    $merged = if ($pr.mergedToMaster) { 'yes' } else { 'no' }
+
+    '<tr>' +
+    '<td class="num">' + $pr.pullRequestId + '</td>' +
+    '<td class="title">' + $titleCell + '<span class="sub">' + (ConvertTo-HtmlText $pr.targetRefName) + '</span>' + $chipLine + '</td>' +
+    '<td>' + (ConvertTo-HtmlText $pr.status) + '</td>' +
+    '<td>' + $merged + '</td>' +
+    '<td class="num">' + $cycle + '</td>' +
+    '<td class="num">' + $pr.commentCount + ' / ' + $pr.threadCount + '</td>' +
+    '<td class="num">' + $pr.filesChangedCount + '</td>' +
+    '<td class="num">+' + $pr.linesAdded + ' / -' + $pr.linesDeleted + '</td>' +
+    '<td class="num">' + $pr.approvedCount + ' / ' + $pr.reviewersCount + '</td>' +
+    '<td class="num">' + $pr.commitCount + '</td>' +
+    '<td class="num">' + $rework + '</td>' +
+    '</tr>'
+}) -join "`n")
+
+# ---- candidate comment flags ----
+$flagCards = (@(foreach ($pr in $prResults) {
+    if ($pr.commentFlags.Count -eq 0) { continue }
+    $card = '<article class="card"><h3>PR #' + $pr.pullRequestId + ' &mdash; ' + (ConvertTo-HtmlText $pr.title) + '</h3><ul>'
+    foreach ($hit in $pr.commentFlags) {
+        $card += '<li><span class="cat">' + (ConvertTo-HtmlText $hit.category) + '</span>' +
+                 '<blockquote>' + (ConvertTo-HtmlText $hit.snippet) + '</blockquote>' +
+                 '<p class="attrib">thread ' + (ConvertTo-HtmlText "$($hit.threadId)") + ', by ' + (ConvertTo-HtmlText $hit.author) + '</p></li>'
+    }
+    $card + '</ul></article>'
+}) -join "`n")
+if (-not $flagCards) { $flagCards = '<p class="empty">No keyword-based comment flags found.</p>' }
+
+# ---- vague commits ----
+$vagueRows = (@(foreach ($hit in $vagueCommitHits) {
+    $shortSha = if ($hit.commitId -and $hit.commitId.Length -gt 8) { $hit.commitId.Substring(0, 8) } else { $hit.commitId }
+    '<tr><td class="num">#' + $hit.pullRequestId + '</td><td>' + (ConvertTo-HtmlText $hit.title) + '</td>' +
+    '<td class="mono">' + (ConvertTo-HtmlText $shortSha) + '</td><td>' + (ConvertTo-HtmlText $hit.message) + '</td></tr>'
+}) -join "`n")
+$vagueSection = if ($vagueCommitHits.Count -eq 0) {
+    '<p class="empty">No vague commit messages detected.</p>'
+} else {
+    '<div class="scroll"><table><thead><tr><th>PR</th><th>Title</th><th>Commit</th><th>Message</th></tr></thead><tbody>' +
+    $vagueRows + '</tbody></table></div>'
+}
+
+# ---- governance flags ----
+$govFlags = (@(
+    foreach ($pr in $selfApprovalPrs) {
+        '<li>' + (New-Chip 'critical' 'self-approved') + ' PR #' + $pr.pullRequestId + ' &mdash; ' +
+        (ConvertTo-HtmlText $pr.title) + '. ' + (ConvertTo-HtmlText $person) +
+        ' appears among the reviewers with an approving vote on their own PR.</li>'
+    }
+    foreach ($pr in $noApprovalPrs) {
+        '<li>' + (New-Chip 'critical' 'no approval') + ' PR #' + $pr.pullRequestId + ' &mdash; ' +
+        (ConvertTo-HtmlText $pr.title) + '. Merged to master with ' + $pr.reviewersCount +
+        ' reviewer(s) assigned but 0 approvals.</li>'
+    }
+) -join "`n")
+$govSection = if (-not $govFlags) {
+    '<p class="empty">No self-approval or no-approval-merge flags detected.</p>'
+} else {
+    '<ul class="flag-list">' + $govFlags + '</ul>'
+}
+
+# ---- confirmed talking points (written by the agent, per RUNBOOK Step 4) ----
+$talkingPoints = '<p class="empty">Not yet written. After the manual review pass (RUNBOOK.md Step 4), save the confirmed points to a text file and re-run with <code>-TalkingPointsPath</code>.</p>'
+if ($TalkingPointsPath -and (Test-Path $TalkingPointsPath)) {
+    $tpRaw = Get-Content -Raw -Path $TalkingPointsPath
+    $talkingPoints = '<pre class="talking-points">' + (ConvertTo-HtmlText $tpRaw) + '</pre>'
+}
+
+$trendNote = if ($previousSummary) {
+    'Trends compare against ' + (ConvertTo-HtmlText "$($previousSummary.monthYear)") + ', the same person.'
+} else {
+    'No prior month found in this folder, so no trends yet. They appear once a second month has been generated for this person.'
+}
+
+$generatedLocal = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+
+# ---- the template. Colours are the validated data-viz reference palette:
+#      status hues are fixed and always ship with a glyph + word, never colour alone.
+$htmlTemplate = @'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR / KPI report - {{PERSON}} - {{MONTH}}</title>
+<style>
+{{STYLE}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="report">
+    <p class="eyebrow">PR / KPI report</p>
+    <h1>{{PERSON}}</h1>
+    <p class="subject">{{MONTH}} &middot; pull requests raised in this month</p>
+    <p class="stamp">Generated {{GENERATED}} &middot; {{TREND_NOTE}}</p>
+  </header>
+
+  <div class="hero">
+    <p class="hero-value">{{SCORE}}</p>
+    <div>
+      <p class="hero-label">Composite quality score, out of 100</p>
+      {{SCORE_DELTA}}
+    </div>
+    <p class="hero-note">A conversation starter, not a rating. The weights are one team's opinion and every input is gameable by anyone who knows the formula. Read the trend against this person's own last month; never rank two people with it.</p>
+  </div>
+
+  <section>
+    <h2>Headline</h2>
+    <div class="tiles">
+      {{TILES}}
+    </div>
+  </section>
+
+  <section class="grid-2">
+    <div>
+      <h2>PR hygiene</h2>
+      <table class="metrics"><tbody>
+        {{HYGIENE_ROWS}}
+      </tbody></table>
+    </div>
+    <div>
+      <h2>Size &amp; risk</h2>
+      <table class="metrics"><tbody>
+        {{SIZE_ROWS}}
+      </tbody></table>
+    </div>
+    <div>
+      <h2>Review governance</h2>
+      <table class="metrics"><tbody>
+        {{GOV_ROWS}}
+      </tbody></table>
+    </div>
+    <div>
+      <h2>Commit hygiene</h2>
+      <table class="metrics"><tbody>
+        {{COMMIT_ROWS}}
+      </tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Pull requests</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>PR</th><th>Title &amp; flags</th><th>Status</th><th>Merged</th><th>Cycle h</th>
+          <th>Comments / threads</th><th>Files</th><th>Lines</th><th>Approvals</th>
+          <th>Commits</th><th>Rework</th>
+        </tr></thead>
+        <tbody>
+          {{PR_ROWS}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Confirmed talking points</h2>
+    {{TALKING_POINTS}}
+  </section>
+
+  <section>
+    <h2>Candidate flags &mdash; not yet confirmed</h2>
+    <p class="callout">Everything below this line is keyword matching, not judgment. Read each one in its original context before raising it: a comment saying "add a null check" may be a recurring blind spot or a one-off on genuinely subtle code, and the script cannot tell those apart. Discard the false positives before the meeting.</p>
+
+    <h3>Review comments</h3>
+    {{FLAG_CARDS}}
+
+    <h3>Vague / non-descriptive commit messages</h3>
+    {{VAGUE_SECTION}}
+
+    <h3>Self-approval and no-approval merges</h3>
+    {{GOV_SECTION}}
+  </section>
+
+  <section>
+    <h2>Comment-flag categories</h2>
+    <table class="metrics"><tbody>
+      {{CATEGORY_ROWS}}
+    </tbody></table>
+  </section>
+
+  <footer class="report">
+    <p><strong>Scope.</strong> This covers pull requests only. Mentoring, design work, on-call, incident response, and whether the person was working on the right thing at all are invisible here. A month with 3 PRs says nothing on its own.</p>
+    <p><strong>Thresholds used.</strong> Large PR at churn &ge; {{LARGE_CHURN}} lines or &ge; {{LARGE_FILES}} files. Description flagged under {{DESC_MIN}} characters. Commit subject flagged as vague under {{VAGUE_MIN}} characters or matching the known-phrase list.</p>
+    <p><strong>Handling.</strong> Contains real review comments about an identifiable person. Keep it out of shared drives and version control, and show the report to the person it describes.</p>
+  </footer>
+
+</div>
+</body>
+</html>
+'@
+
+$html = $htmlTemplate.
+    Replace('{{STYLE}}',         (Get-KpiReportCss)).
+    Replace('{{PERSON}}',        (ConvertTo-HtmlText $person)).
+    Replace('{{MONTH}}',         (ConvertTo-HtmlText $monthYear)).
+    Replace('{{GENERATED}}',     (ConvertTo-HtmlText $generatedLocal)).
+    Replace('{{TREND_NOTE}}',    $trendNote).
+    Replace('{{SCORE}}',         "$qualityScore").
+    Replace('{{SCORE_DELTA}}',   (New-DeltaHtml -Current $qualityScore -Previous $previousSummary.qualityScore -HigherIsBetter)).
+    Replace('{{TILES}}',         $tiles).
+    Replace('{{HYGIENE_ROWS}}',  $hygieneRows).
+    Replace('{{SIZE_ROWS}}',     $sizeRows).
+    Replace('{{GOV_ROWS}}',      $govRows).
+    Replace('{{COMMIT_ROWS}}',   $commitRows).
+    Replace('{{PR_ROWS}}',       $prRows).
+    Replace('{{TALKING_POINTS}}', $talkingPoints).
+    Replace('{{FLAG_CARDS}}',    $flagCards).
+    Replace('{{VAGUE_SECTION}}', $vagueSection).
+    Replace('{{GOV_SECTION}}',   $govSection).
+    Replace('{{CATEGORY_ROWS}}', $categoryRows).
+    Replace('{{LARGE_CHURN}}',   "$LargeChurnThreshold").
+    Replace('{{LARGE_FILES}}',   "$LargeFileCountThreshold").
+    Replace('{{DESC_MIN}}',      "$DescriptionMinLength").
+    Replace('{{VAGUE_MIN}}',     "$VagueCommitMinLength")
+
+$html | Set-Content -Path $htmlPath -Encoding UTF8
+
+Write-Host "HTML report:  $htmlPath"
+Write-Host "PR CSV:       $prsCsvPath"
+Write-Host "Ledger CSV:   $ledgerPath"
 Write-Host "Summary JSON: $summaryPath"
-Write-Host "Markdown report: $mdPath"
-Write-Host ("PRs raised: {0}, Merged to master: {1} ({2}%), Quality score: {3}" -f $totalRaised, $mergedToMaster, $summary.mergeRatePercent.ToString([System.Globalization.CultureInfo]::InvariantCulture), $qualityScore.ToString([System.Globalization.CultureInfo]::InvariantCulture))
+Write-Host ("PRs raised: {0}, Merged to master: {1} ({2}%), Quality score: {3}" -f $totalRaised, $mergedToMaster, $summary.mergeRatePercent, $qualityScore)

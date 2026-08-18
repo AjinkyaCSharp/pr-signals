@@ -36,7 +36,10 @@ never be asked to judge tone.
    └─────────┬──────────────────┘
              │ 4. emit
              v
-   kpi-reports/<person>-<month>.md + -summary.json
+   kpi-reports/  <person>-<month>.html      <- the report you present
+                 <person>-<month>-prs.csv   <- one row per PR
+                 kpi-ledger.csv             <- one row per person-month, accumulating
+                 <person>-<month>-summary.json
              │
              │ 5. review
              v
@@ -112,10 +115,91 @@ cd pr-signals
 Expected:
 
 ```
+HTML report:  .\kpi-reports\jane.doe@example.com-2025-07.html
+PR CSV:       .\kpi-reports\jane.doe@example.com-2025-07-prs.csv
+Ledger CSV:   .\kpi-reports\kpi-ledger.csv
 Summary JSON: .\kpi-reports\jane.doe@example.com-2025-07-summary.json
-Markdown report: .\kpi-reports\jane.doe@example.com-2025-07.md
-PRs raised: 3, Merged to master: 2 (66.7%)
+PRs raised: 3, Merged to master: 2 (66.7%), Quality score: 57.8
 ```
+
+### The three outputs
+
+Every run writes the same shapes, so reports are comparable across people and months.
+
+| File | Format | For |
+|---|---|---|
+| `<person>-<month>.html` | self-contained HTML | **the meeting.** Open it or project it. Headline tiles, trend deltas vs the person's own last month, the PR table, and the candidate flags kept visually separate from the confirmed talking points. Prints cleanly if you want a handout. |
+| `<person>-<month>-prs.csv` | CSV, one row per PR | **the detail.** Fixed 29 columns, so PRs from any person or month stack in one sheet. |
+| `kpi-ledger.csv` | CSV, one row per person-month | **record keeping.** Accumulates across every run and updates in place when a month is re-run, so it's the file to pivot on for history. |
+| `<person>-<month>-summary.json` | JSON | machine-readable, and what the next month reads to compute its trend column. Keep it. |
+
+The confirmed talking points from the manual review pass go in via
+`-TalkingPointsPath <file>`; re-run the script and they're embedded at the top of
+the HTML, above the unconfirmed flags.
+
+---
+
+## A whole team, in one command
+
+A scrum master doesn't want to run this eleven times. Put the roster in
+`teams.json` once:
+
+```powershell
+copy teams.example.json teams.json    # then fill in your team; it's gitignored
+```
+
+```json
+{
+  "teams": [
+    { "name": "alpha", "displayName": "Team Alpha",
+      "members": [
+        { "email": "first.member@example.com",  "displayName": "First Member" },
+        { "email": "second.member@example.com", "displayName": "Second Member" }
+      ] }
+  ]
+}
+```
+
+Then name the team and the window:
+
+```powershell
+.\Get-TeamRollupReport.ps1 -TeamName alpha -Period quarter -EndMonth 2026-07
+```
+
+That runs the individual report for every member and every month in the period,
+then aggregates the lot into a team report. `-Period` takes **`month`**,
+**`quarter`** (3), **`halfyear`** (6) or **`year`** (12); `-EndMonth` is the last
+month of the range, defaulting to the current one. `-SkipMemberReports`
+re-aggregates already-collected data instantly, without touching Azure DevOps —
+so collect once, then slice the same months as a month, a quarter and a year.
+
+📄 [**See an example team report**](samples/example-team-report.html)
+
+### What the team report adds
+
+- **Team performance** — delivery, review culture, PR and commit hygiene, and
+  governance risk, each with a delta against the *previous equal-length period*
+  (a quarter compares to the quarter before it)
+- **Workload spread** — lowest / median / highest PRs per member, and the share
+  held by the busiest member. This is a planning signal: it answers "is everything
+  concentrated in one person, and what happens when they're away", not "who is best"
+- **Per member** — one row each, listed **alphabetically on purpose**; sorting it
+  by PR count would make it a ranking, and PR counts track ticket sizing
+- **Governance flags across the team** — every self-approval and no-approval merge
+  in one table, which is a process problem to fix rather than a person to blame
+- **Coverage** — member-months with no collected data, counted as *missing* rather
+  than as zero, because "raised no PRs" and "we never fetched it" are different facts
+
+Team rates are recomputed from pooled counts, never averaged from the members'
+own rates — averaging percentages would weight someone with 2 PRs the same as
+someone with 20. Cycle-time medians come from the full pooled list of PRs.
+
+Outputs: `<team>-<period>-team.html`, `<team>-<period>-members.csv` (one row per
+member per month), `<team>-<period>-prs.csv`, and `team-ledger.csv` accumulating
+one row per team-period.
+
+📋 [**PROMPTS.md**](PROMPTS.md) has the copy-paste prompts — team for a month, a
+quarter, six months or a year, plus the single-person flow.
 
 Then, for a real run, open your agent CLI in this folder and ask:
 
@@ -123,8 +207,9 @@ Then, for a real run, open your agent CLI in this folder and ask:
 > folder — project `<Project>`, repo `<Repo>`, target branch master. Save the raw JSON
 > and report into kpi-raw / kpi-reports.
 
-- 📄 [**See a full example report**](samples/example-report.md) — generated from
-  [`samples/sample-input.json`](samples/sample-input.json)
+- 📄 [**See a full example report**](samples/example-report.html) — real output, generated from
+  [`samples/sample-input.json`](samples/sample-input.json), alongside the matching
+  [`example-prs.csv`](samples/example-prs.csv) and [`example-ledger.csv`](samples/example-ledger.csv)
 - 🔧 [SETUP-GUIDE.md](SETUP-GUIDE.md) — prerequisites and one-time setup
 - 📖 [RUNBOOK.md](RUNBOOK.md) — the exact ADO queries the agent runs, and the manual
   confirmation pass

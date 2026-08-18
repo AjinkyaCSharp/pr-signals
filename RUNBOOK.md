@@ -93,8 +93,11 @@ Assemble everything into one JSON document matching the schema expected by
 ```
 
 This produces:
-- `kpi-reports/<email>-<month-year>-summary.json` — machine-readable metrics + flags
-- `kpi-reports/<email>-<month-year>.md` — human-readable draft report
+- `kpi-reports/<email>-<month-year>.html` — the report to present in the 1-1
+- `kpi-reports/<email>-<month-year>-prs.csv` — one row per PR, fixed columns
+- `kpi-reports/kpi-ledger.csv` — one row per person-month, updated in place on re-runs
+- `kpi-reports/<email>-<month-year>-summary.json` — machine-readable metrics + flags,
+  and the file next month reads to compute its trend column
 
 ## Step 4 — Final review (agent, not the script)
 
@@ -108,4 +111,44 @@ the report to the user, the agent:
 - Confirms self-approval / no-approval-merge flags aren't due to missing reviewer
   data or a legitimate branch-policy bypass (e.g. hotfix process).
 
-This final pass is appended to the Markdown report under "Confirmed talking points".
+Write this final pass to `kpi-reports/<email>-<month-year>-talking-points.md` as plain
+text, then re-run Step 3 with `-TalkingPointsPath` pointing at it:
+
+```powershell
+.\Get-TeamKpiReport.ps1 -InputJsonPath ".\kpi-raw\<email>-<month-year>.json" `
+    -OutputDir ".\kpi-reports" `
+    -TalkingPointsPath ".\kpi-reports\<email>-<month-year>-talking-points.md"
+```
+
+The text is embedded in the HTML report's "Confirmed talking points" section, which
+sits **above** the unconfirmed candidate flags — so the thing that was actually
+verified is what the reader meets first.
+
+## Step 5 — A whole team, over a month / quarter / 6 months / year
+
+Steps 1-2 are per person, per month. To cover a team, repeat them for every member
+on the roster and every month in the period, then let the rollup script do the rest.
+
+1. Read the member list from `teams.json` (copy `teams.example.json` if it doesn't
+   exist yet). Match `-TeamName` case-insensitively against `name` / `displayName`.
+2. Work out the months in the period: `month` = 1, `quarter` = 3, `halfyear` = 6,
+   `year` = 12, counting back from and including `-EndMonth`.
+3. For each member × month, run steps 1-2 above and save to
+   `kpi-raw/<email>-<month>.json`. **Skip any that already exist** — the ADO fetch
+   is the slow part, and past months don't change.
+4. Run the rollup, which invokes `Get-TeamKpiReport.ps1` for every member+month
+   that has raw data and then aggregates:
+
+```powershell
+.\Get-TeamRollupReport.ps1 -TeamName <team> -Period quarter -EndMonth 2026-07
+```
+
+Add `-SkipMemberReports` to re-aggregate existing data without re-running the
+per-person reports. Member-months with no raw data are reported as **coverage
+gaps**, not as zero — report those back to the user rather than letting a missing
+fetch read as "this person raised nothing".
+
+Then do Step 4 above for each member individually; the team report deliberately
+carries no candidate flags, because confirming them is per-person work.
+
+See `PROMPTS.md` for the ready-made prompts.

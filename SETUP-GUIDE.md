@@ -16,10 +16,16 @@ month-over-month trend deltas (once two or more months exist in the same
 
 | File | Purpose |
 |---|---|
-| `Get-TeamKpiReport.ps1` | PowerShell script that computes the KPIs/flags from a JSON data file. Does the actual math/report-building. |
+| `Get-TeamKpiReport.ps1` | PowerShell script that computes the KPIs/flags from a JSON data file, for **one person, one month**. Does the actual math/report-building. |
+| `Get-TeamRollupReport.ps1` | Runs the above for **every member of a team** across a month/quarter/6 months/year, then aggregates it into a team report. |
+| `KpiReportCommon.ps1` | Shared HTML helpers and the single stylesheet both reports render with. Not run directly. |
+| `teams.example.json` | Placeholder roster. **Copy it to `teams.json`** and put your team's emails in that copy — `teams.json` is gitignored. |
+| `PROMPTS.md` | Copy-paste prompts for the agent: one person, or a whole team over any period. |
 | `RUNBOOK.md` | Step-by-step instructions for **how the data gets collected** from Azure DevOps and fed into the script. |
 | `samples/sample-input.json` | A worked example input file — use it to sanity-check the script works on your machine before doing a real run. |
-| `samples/example-report.md` | What the script produces from that sample input. |
+| `samples/example-report.html` | What the script produces from that sample input — open it in a browser. |
+| `samples/example-prs.csv` | The per-PR CSV from the same run. |
+| `samples/example-ledger.csv` | The accumulating person-month ledger from the same run. |
 | `kpi-raw/` | Where collected raw data lands. **Gitignored** — real PR text and colleague identities. |
 | `kpi-reports/` | Where reports land after you run the script. **Gitignored** — same reason. |
 
@@ -36,7 +42,7 @@ So the real workflow each month is:
 1. Open GitHub Copilot CLI (in this folder, or point it at this folder).
 2. Ask it to run the KPI report for a specific person + month (see prompt below).
 3. Copilot CLI fetches the ADO data, assembles the JSON, runs the script, and hands
-   you back the Markdown report — then you review the "candidate comment flags" it
+   you back the HTML report — then you review the "candidate comment flags" it
    found and add your own judgment on anything more subtle before your 1-1.
 
 ## Prerequisites
@@ -63,13 +69,29 @@ So the real workflow each month is:
    ```
    You should see output like:
    ```
+   HTML report:  .\kpi-reports\jane.doe@example.com-2025-07.html
+   PR CSV:       .\kpi-reports\jane.doe@example.com-2025-07-prs.csv
+   Ledger CSV:   .\kpi-reports\kpi-ledger.csv
    Summary JSON: .\kpi-reports\jane.doe@example.com-2025-07-summary.json
-   Markdown report: .\kpi-reports\jane.doe@example.com-2025-07.md
-   PRs raised: 3, Merged to master: 2 (66.7%)
+   PRs raised: 3, Merged to master: 2 (66.7%), Quality score: 57.8
    ```
+   Open the HTML file in a browser — that's the one you bring to the meeting.
    If that works, the script side is good to go.
 3. Open `RUNBOOK.md` and skim it once so you know what Copilot CLI will be doing
    under the hood.
+4. If you're a scrum master reporting on a whole team, copy the roster placeholder
+   and fill in your team:
+   ```powershell
+   copy teams.example.json teams.json
+   ```
+   Add one entry per member (`email` is the only required field). `teams.json` is
+   gitignored because it holds colleague email addresses — keep it that way.
+   Then a whole team, for any period, is one command:
+   ```powershell
+   .\Get-TeamRollupReport.ps1 -TeamName alpha -Period quarter -EndMonth 2026-07
+   ```
+   `-Period` accepts `month`, `quarter`, `halfyear` or `year`. See `PROMPTS.md`
+   for the agent prompts that collect the data first.
 
 ## Running it for a real teammate/month
 
@@ -89,11 +111,13 @@ Copilot CLI will then:
   hygiene, and self-approval metrics, plus heuristic flags.
 - Manually read the flagged/candidate comments and commit messages, and produce a
   final "Confirmed talking points" section with reviewer quotes and links, appended
-  to the Markdown report — this last step needs the AI's judgment, not just the
-  script, since real comment/commit-message classification isn't reliable from
-  keyword matching alone.
+  into the HTML report via `-TalkingPointsPath` — this last step needs the AI's
+  judgment, not just the script, since real comment/commit-message classification
+  isn't reliable from keyword matching alone.
 
-Your report will be at `kpi-reports/<email>-<month-year>.md`, ready to bring to the 1-1.
+Your report will be at `kpi-reports/<email>-<month-year>.html`, ready to bring to the
+1-1. The matching `-prs.csv` and the accumulating `kpi-ledger.csv` land beside it for
+record keeping.
 
 ## Notes
 

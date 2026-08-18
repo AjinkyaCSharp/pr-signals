@@ -1,0 +1,39 @@
+{
+  "_readme": [
+    "Copy this file to teams.json (which is gitignored) and put your real team in it.",
+    "teams.json holds colleague email addresses, so it must never be committed.",
+    "Team names are matched case-insensitively: -TeamName alpha finds 'Alpha'.",
+    "Every field except name and members[].email is optional."
+  ],
+
+  "defaults": {
+    "project": "<your-ado-project>",
+    "repository": "<your-ado-repo>",
+    "targetMasterBranch": "refs/heads/master"
+  },
+
+  "teams": [
+    {
+      "name": "alpha",
+      "displayName": "Team Alpha",
+      "scrumMaster": "sm.name@example.com",
+      "project": "<your-ado-project>",
+      "repository": "<your-ado-repo>",
+      "targetMasterBranch": "refs/heads/master",
+      "members": [
+        { "email": "first.member@example.com",  "displayName": "First Member" },
+        { "email": "second.member@example.com", "displayName": "Second Member" },
+        { "email": "third.member@example.com",  "displayName": "Third Member" }
+      ]
+    },
+    {
+      "name": "beta",
+      "displayName": "Team Beta",
+      "scrumMaster": "other.sm@example.com",
+      "members": [
+        { "email": "fourth.member@example.com", "displayName": "Fourth Member" },
+        { "email": "fifth.member@example.com",  "displayName": "Fifth Member" }
+      ]
+    }
+  ]
+}
