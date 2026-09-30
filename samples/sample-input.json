@@ -79,5 +79,28 @@
       "workItemRefs": [ { "id": 4002, "url": "https://dev.azure.com/your-org/YourProject/_workitems/edit/4002" } ],
       "threads": []
     }
+  ],
+  "reviewedPullRequests": [
+    {
+      "pullRequestId": 210,
+      "title": "Add retry to payment webhook",
+      "url": "https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/210",
+      "author": "John Reviewer",
+      "vote": 10
+    },
+    {
+      "pullRequestId": 211,
+      "title": "Refactor invoice PDF generation",
+      "url": "https://dev.azure.com/your-org/YourProject/_git/YourRepo/pullrequest/211",
+      "author": "Alex Author",
+      "vote": 5
+    }
+  ],
+  "workItems": [
+    { "id": 4001, "type": "Bug", "state": "Closed", "title": "Null reference in order export" },
+    { "id": 4002, "type": "Feature", "state": "Active", "title": "Report caching" },
+    { "id": 4003, "type": "Task", "state": "Done", "title": "Add regression test harness" },
+    { "id": 4004, "type": "User Story", "state": "Resolved", "title": "As a user I can export filtered orders" },
+    { "id": 4005, "type": "Epic", "state": "New", "title": "Reporting platform revamp" }
   ]
 }

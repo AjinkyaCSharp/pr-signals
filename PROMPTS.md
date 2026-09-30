@@ -55,8 +55,9 @@ Same as above, with `-Period` swapped. `-EndMonth` is the **last** month of the 
 > .\Get-TeamRollupReport.ps1 -TeamName <team-name> -Period quarter -EndMonth <yyyy-MM>
 > ```
 >
-> Summarise for me: what moved versus the previous quarter, which governance flags
-> appeared, and where the coverage gaps are. Do not rank the team members.
+> Summarise for me: what moved versus the previous quarter, how review load and
+> work item completion look across the team, and where the coverage gaps are.
+> Do not rank the team members.
 
 For a 6-month or annual review, swap `quarter` for `halfyear` or `year` in both the
 prompt and the command.

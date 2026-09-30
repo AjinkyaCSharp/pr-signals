@@ -162,20 +162,20 @@ function Get-TeamAggregate {
                 person                  = $s.person
                 displayName             = $member.displayName
                 monthYear               = $s.monthYear
-                qualityScore            = $s.qualityScore
                 totalRaised             = $s.totalRaised
                 mergedToMaster          = $s.mergedToMaster
                 mergeRatePercent        = $s.mergeRatePercent
-                medianCycleTimeHours    = $s.medianCycleTimeHours
-                threadResolutionPercent = $s.threadResolutionPercent
+                medianCycleTimeDays     = $s.medianCycleTimeDays
                 totalComments           = $s.totalComments
                 reviewerDiversityCount  = $s.reviewerDiversityCount
                 noWorkItemRatePercent   = $s.noWorkItemRatePercent
                 largePrCount            = $s.largePrCount
-                selfApprovalCount       = $s.selfApprovalCount
-                noApprovalMergedCount   = $s.noApprovalMergedCount
                 vagueCommitCount        = $s.vagueCommitCount
                 vagueCommitRatePercent  = $s.vagueCommitRatePercent
+                reviewedCount           = $s.reviewedCount
+                reviewedApprovedCount   = $s.reviewedApprovedCount
+                totalWorkItemsAssigned  = $s.totalWorkItemsAssigned
+                totalWorkItemsCompleted = $s.totalWorkItemsCompleted
             }) | Out-Null
         }
     }
@@ -184,9 +184,8 @@ function Get-TeamAggregate {
     $raised = $allPrs.Count
     $merged = @($allPrs | Where-Object { $_.pr.mergedToMaster }).Count
     $abandoned = @($allPrs | Where-Object { $_.pr.status -ieq 'abandoned' }).Count
-    $cycleTimes = @($allPrs | Where-Object { $_.pr.mergedToMaster -and $null -ne $_.pr.cycleTimeHours } |
-                    ForEach-Object { [double]$_.pr.cycleTimeHours })
-    $threads   = (@($allPrs | ForEach-Object { [int]$_.pr.threadCount }) | Measure-Object -Sum).Sum
+    $cycleTimes = @($allPrs | Where-Object { $_.pr.mergedToMaster -and $null -ne $_.pr.cycleTimeDays } |
+                    ForEach-Object { [double]$_.pr.cycleTimeDays })
     $comments  = (@($allPrs | ForEach-Object { [int]$_.pr.commentCount }) | Measure-Object -Sum).Sum
     $added     = (@($allPrs | ForEach-Object { [int]$_.pr.linesAdded }) | Measure-Object -Sum).Sum
     $deleted   = (@($allPrs | ForEach-Object { [int]$_.pr.linesDeleted }) | Measure-Object -Sum).Sum
@@ -194,22 +193,34 @@ function Get-TeamAggregate {
     $commits   = (@($allPrs | ForEach-Object { [int]$_.pr.commitCount }) | Measure-Object -Sum).Sum
     $vague     = (@($allPrs | ForEach-Object { [int]$_.pr.vagueCommitCount }) | Measure-Object -Sum).Sum
     $largePrs  = @($allPrs | Where-Object { $_.pr.largePrFlag }).Count
-    $selfApp   = @($allPrs | Where-Object { $_.pr.selfApprovalFlag }).Count
-    $noAppr    = @($allPrs | Where-Object { $_.pr.noApprovalMergedFlag }).Count
     $noWorkIt  = @($allPrs | Where-Object { $_.pr.noWorkItemFlag }).Count
     $descFlag  = @($allPrs | Where-Object { $_.pr.descriptionFlag }).Count
     $flagged   = @($allPrs | Where-Object { [int]$_.pr.commentFlagCount -gt 0 }).Count
 
-    # Resolved threads aren't on the PR object, so take them from the member summaries.
-    $resolved = 0; $threadTotalFromSummaries = 0
+    # Reviewed-PR counts and work-item counts aren't on the pooled PR list, so
+    # take them from the member summaries directly.
+    $reviewedTotal = 0; $reviewedApprovedTotal = 0
+    $workItemsAssignedTotal = 0; $workItemsCompletedTotal = 0
+    $workItemBucketTotals = [ordered]@{}
     foreach ($member in $Members) {
         $safeEmail = Get-SafeName $member.email
         foreach ($month in $Months) {
             $p = Join-Path $SummaryDir "$safeEmail-$month-summary.json"
             if (-not (Test-Path $p)) { continue }
             $s = Get-Content -Raw -Path $p | ConvertFrom-Json
-            $resolved += [int]$s.resolvedThreads
-            $threadTotalFromSummaries += [int]$s.totalThreads
+            $reviewedTotal += [int]$s.reviewedCount
+            $reviewedApprovedTotal += [int]$s.reviewedApprovedCount
+            $workItemsAssignedTotal += [int]$s.totalWorkItemsAssigned
+            $workItemsCompletedTotal += [int]$s.totalWorkItemsCompleted
+            if ($s.workItemSummary) {
+                foreach ($prop in $s.workItemSummary.PSObject.Properties) {
+                    if (-not $workItemBucketTotals.Contains($prop.Name)) {
+                        $workItemBucketTotals[$prop.Name] = [ordered]@{ assigned = 0; completed = 0 }
+                    }
+                    $workItemBucketTotals[$prop.Name].assigned += [int]$prop.Value.assigned
+                    $workItemBucketTotals[$prop.Name].completed += [int]$prop.Value.completed
+                }
+            }
         }
     }
 
@@ -217,22 +228,11 @@ function Get-TeamAggregate {
 
     $mergeRate       = & $pct $merged $raised
     $abandonRate     = & $pct $abandoned $raised
-    $threadResPct    = if ($threadTotalFromSummaries -gt 0) { [math]::Round(100 * $resolved / $threadTotalFromSummaries, 1) } else { $null }
     $noWorkItemRate  = & $pct $noWorkIt $raised
     $descFlagRate    = & $pct $descFlag $raised
     $commentFlagRate = & $pct $flagged $raised
     $largePrRate     = & $pct $largePrs $raised
-    $selfApprovalRate= & $pct $selfApp $raised
-    $noApprovalRate  = if ($merged -gt 0) { [math]::Round(100 * $noAppr / $merged, 1) } else { 0 }
     $vagueRate       = & $pct $vague $commits
-
-    # Same composite formula as the individual report, fed team-level totals.
-    $hygiene = 100 - (($noWorkItemRate + $descFlagRate + $commentFlagRate + $largePrRate + $vagueRate) / 5)
-    if ($hygiene -lt 0) { $hygiene = 0 }
-    $governance = 100 - (($selfApprovalRate * 2) + $noApprovalRate)
-    if ($governance -lt 0) { $governance = 0 }
-    $threadResForScore = if ($null -ne $threadResPct) { $threadResPct } else { 100 }
-    $score = [math]::Round((0.35 * $mergeRate) + (0.25 * $threadResForScore) + (0.25 * $hygiene) + (0.15 * $governance), 1)
 
     # Workload spread. Reported as a distribution, never as a ranking - PR counts
     # track ticket sizing far more than they track ability.
@@ -251,11 +251,8 @@ function Get-TeamAggregate {
         mergeRatePercent        = $mergeRate
         abandonedCount          = $abandoned
         abandonRatePercent      = $abandonRate
-        avgCycleTimeHours       = if ($cycleTimes.Count -gt 0) { [math]::Round(($cycleTimes | Measure-Object -Average).Average, 1) } else { $null }
-        medianCycleTimeHours    = Get-Median -Values $cycleTimes
-        totalThreads            = $threadTotalFromSummaries
-        resolvedThreads         = $resolved
-        threadResolutionPercent = $threadResPct
+        avgCycleTimeDays        = if ($cycleTimes.Count -gt 0) { [math]::Round(($cycleTimes | Measure-Object -Average).Average, 1) } else { $null }
+        medianCycleTimeDays     = Get-Median -Values $cycleTimes
         totalComments           = $comments
         avgCommentsPerPr        = if ($raised -gt 0) { [math]::Round($comments / $raised, 1) } else { 0 }
         noWorkItemCount         = $noWorkIt
@@ -269,14 +266,14 @@ function Get-TeamAggregate {
         avgChurnPerPr           = if ($raised -gt 0) { [math]::Round(($added + $deleted) / $raised, 1) } else { 0 }
         largePrCount            = $largePrs
         largePrRatePercent      = $largePrRate
-        selfApprovalCount       = $selfApp
-        selfApprovalRatePercent = $selfApprovalRate
-        noApprovalMergedCount   = $noAppr
-        noApprovalMergedRatePercent = $noApprovalRate
         totalCommits            = $commits
         vagueCommitCount        = $vague
         vagueCommitRatePercent  = $vagueRate
-        teamQualityScore        = $score
+        reviewedCount           = $reviewedTotal
+        reviewedApprovedCount   = $reviewedApprovedTotal
+        totalWorkItemsAssigned  = $workItemsAssignedTotal
+        totalWorkItemsCompleted = $workItemsCompletedTotal
+        workItemBucketTotals    = $workItemBucketTotals
         prsPerMemberMax         = $busiest
         prsPerMemberMin         = $quietest
         prsPerMemberMedian      = Get-Median -Values @($counts | ForEach-Object { [double]$_ })
@@ -319,7 +316,7 @@ $teamPrRows = foreach ($entry in $agg.allPrs) {
         url               = $pr.url
         status            = $pr.status
         mergedToMaster    = $pr.mergedToMaster
-        cycleTimeHours    = $pr.cycleTimeHours
+        cycleTimeDays     = $pr.cycleTimeDays
         threadCount       = $pr.threadCount
         commentCount      = $pr.commentCount
         filesChangedCount = $pr.filesChangedCount
@@ -329,8 +326,6 @@ $teamPrRows = foreach ($entry in $agg.allPrs) {
         largePrFlag       = $pr.largePrFlag
         noWorkItemFlag    = $pr.noWorkItemFlag
         descriptionFlag   = $pr.descriptionFlag
-        selfApprovalFlag  = $pr.selfApprovalFlag
-        noApprovalMergedFlag = $pr.noApprovalMergedFlag
         commitCount       = $pr.commitCount
         vagueCommitCount  = $pr.vagueCommitCount
     }
@@ -338,14 +333,14 @@ $teamPrRows = foreach ($entry in $agg.allPrs) {
 @($teamPrRows) | Export-Csv -Path $teamPrsCsvPath -NoTypeInformation -Encoding UTF8
 
 $ledgerColumns = @(
-    'team', 'period', 'periodStart', 'periodEnd', 'generatedAtUtc', 'teamQualityScore',
+    'team', 'period', 'periodStart', 'periodEnd', 'generatedAtUtc',
     'memberCount', 'contributorCount', 'totalRaised', 'mergedToMaster', 'mergeRatePercent',
-    'abandonedCount', 'abandonRatePercent', 'avgCycleTimeHours', 'medianCycleTimeHours',
-    'totalThreads', 'resolvedThreads', 'threadResolutionPercent', 'totalComments', 'avgCommentsPerPr',
+    'abandonedCount', 'abandonRatePercent', 'avgCycleTimeDays', 'medianCycleTimeDays',
+    'totalComments', 'avgCommentsPerPr',
     'noWorkItemRatePercent', 'descriptionFlagRatePercent', 'commentFlagRatePercent',
     'totalLinesAdded', 'totalLinesDeleted', 'avgChurnPerPr', 'largePrCount', 'largePrRatePercent',
-    'selfApprovalCount', 'selfApprovalRatePercent', 'noApprovalMergedCount', 'noApprovalMergedRatePercent',
     'totalCommits', 'vagueCommitCount', 'vagueCommitRatePercent',
+    'reviewedCount', 'reviewedApprovedCount', 'totalWorkItemsAssigned', 'totalWorkItemsCompleted',
     'prsPerMemberMin', 'prsPerMemberMedian', 'prsPerMemberMax', 'busiestSharePercent', 'coverageGaps'
 )
 $ledgerRow = [pscustomobject][ordered]@{}
@@ -381,28 +376,28 @@ $tiles = @(
         -DeltaHtml (New-DeltaHtml -Current $agg.totalRaised -Previous $prev.totalRaised -HigherIsBetter -PeriodLabel $cmp)),
     (New-Tile -Label 'Merged to master' -Value "$($agg.mergedToMaster)" -Note "$($agg.mergeRatePercent)% of PRs raised" `
         -DeltaHtml (New-DeltaHtml -Current $agg.mergeRatePercent -Previous $prev.mergeRatePercent -HigherIsBetter -Suffix 'pp' -PeriodLabel $cmp)),
-    (New-Tile -Label 'Median cycle time' -Value (Format-Metric $agg.medianCycleTimeHours ' h') -Note (Format-Metric $agg.avgCycleTimeHours ' h average') `
-        -DeltaHtml (New-DeltaHtml -Current $agg.medianCycleTimeHours -Previous $prev.medianCycleTimeHours -Suffix 'h' -PeriodLabel $cmp)),
-    (New-Tile -Label 'Threads resolved' -Value (Format-Metric $agg.threadResolutionPercent '%') -Note "$($agg.resolvedThreads) of $($agg.totalThreads) threads" `
-        -DeltaHtml (New-DeltaHtml -Current $agg.threadResolutionPercent -Previous $prev.threadResolutionPercent -HigherIsBetter -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-Tile -Label 'Median cycle time' -Value (Format-Metric $agg.medianCycleTimeDays ' d') -Note (Format-Metric $agg.avgCycleTimeDays ' d average') `
+        -DeltaHtml (New-DeltaHtml -Current $agg.medianCycleTimeDays -Previous $prev.medianCycleTimeDays -Suffix 'd' -PeriodLabel $cmp)),
     (New-Tile -Label 'Review comments' -Value "$($agg.totalComments)" -Note "avg $($agg.avgCommentsPerPr) per PR" `
         -DeltaHtml (New-DeltaHtml -Current $agg.avgCommentsPerPr -Previous $prev.avgCommentsPerPr -Suffix '/PR' -PeriodLabel $cmp)),
-    (New-Tile -Label 'Governance flags' -Value "$($agg.selfApprovalCount + $agg.noApprovalMergedCount)" -Note 'self-approvals + no-approval merges' `
-        -DeltaHtml (New-DeltaHtml -Current ($agg.selfApprovalCount + $agg.noApprovalMergedCount) -Previous ($prev.selfApprovalCount + $prev.noApprovalMergedCount) -PeriodLabel $cmp))
+    (New-Tile -Label 'PRs reviewed' -Value "$($agg.reviewedCount)" -Note "$($agg.reviewedApprovedCount) approved" `
+        -DeltaHtml (New-DeltaHtml -Current $agg.reviewedCount -Previous $prev.reviewedCount -HigherIsBetter -PeriodLabel $cmp)),
+    (New-Tile -Label 'Work items assigned' -Value "$($agg.totalWorkItemsAssigned)" -Note "$($agg.totalWorkItemsCompleted) completed" `
+        -DeltaHtml (New-DeltaHtml -Current $agg.totalWorkItemsAssigned -Previous $prev.totalWorkItemsAssigned -PeriodLabel $cmp))
 ) -join "`n"
 
 $deliveryRows = @(
     (New-MetricRow 'PRs raised' "$($agg.totalRaised)" (New-DeltaHtml -Current $agg.totalRaised -Previous $prev.totalRaised -HigherIsBetter -PeriodLabel $cmp)),
     (New-MetricRow 'Merged to master' "$($agg.mergedToMaster) ($($agg.mergeRatePercent)%)" (New-DeltaHtml -Current $agg.mergeRatePercent -Previous $prev.mergeRatePercent -HigherIsBetter -Suffix 'pp' -PeriodLabel $cmp)),
     (New-MetricRow 'Abandoned' "$($agg.abandonedCount) ($($agg.abandonRatePercent)%)" (New-DeltaHtml -Current $agg.abandonRatePercent -Previous $prev.abandonRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
-    (New-MetricRow 'Avg cycle time' (Format-Metric $agg.avgCycleTimeHours ' h') (New-DeltaHtml -Current $agg.avgCycleTimeHours -Previous $prev.avgCycleTimeHours -Suffix 'h' -PeriodLabel $cmp))
+    (New-MetricRow 'Avg cycle time' (Format-Metric $agg.avgCycleTimeDays ' d') (New-DeltaHtml -Current $agg.avgCycleTimeDays -Previous $prev.avgCycleTimeDays -Suffix 'd' -PeriodLabel $cmp))
 ) -join "`n"
 
 $reviewRows = @(
-    (New-MetricRow 'Review threads' "$($agg.totalThreads)" ''),
-    (New-MetricRow 'Threads resolved' "$($agg.resolvedThreads) ($(Format-Metric $agg.threadResolutionPercent '%'))" (New-DeltaHtml -Current $agg.threadResolutionPercent -Previous $prev.threadResolutionPercent -HigherIsBetter -Suffix 'pp' -PeriodLabel $cmp)),
     (New-MetricRow 'Comments per PR' "$($agg.avgCommentsPerPr)" (New-DeltaHtml -Current $agg.avgCommentsPerPr -Previous $prev.avgCommentsPerPr -Suffix '/PR' -PeriodLabel $cmp)),
-    (New-MetricRow 'PRs with a comment flag' "$($agg.commentFlagRatePercent)%" (New-DeltaHtml -Current $agg.commentFlagRatePercent -Previous $prev.commentFlagRatePercent -Suffix 'pp' -PeriodLabel $cmp))
+    (New-MetricRow 'PRs with a comment flag' "$($agg.commentFlagRatePercent)%" (New-DeltaHtml -Current $agg.commentFlagRatePercent -Previous $prev.commentFlagRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow 'PRs reviewed by team members (for others)' "$($agg.reviewedCount)" (New-DeltaHtml -Current $agg.reviewedCount -Previous $prev.reviewedCount -HigherIsBetter -PeriodLabel $cmp)),
+    (New-MetricRow 'Of those, approved' "$($agg.reviewedApprovedCount)" (New-DeltaHtml -Current $agg.reviewedApprovedCount -Previous $prev.reviewedApprovedCount -PeriodLabel $cmp))
 ) -join "`n"
 
 $hygieneRows = @(
@@ -413,10 +408,13 @@ $hygieneRows = @(
     (New-MetricRow 'Vague commit messages' "$($agg.vagueCommitCount) of $($agg.totalCommits) ($($agg.vagueCommitRatePercent)%)" (New-DeltaHtml -Current $agg.vagueCommitRatePercent -Previous $prev.vagueCommitRatePercent -Suffix 'pp' -PeriodLabel $cmp))
 ) -join "`n"
 
-$govRows = @(
-    (New-MetricRow 'Author approved their own PR' "$($agg.selfApprovalCount) ($($agg.selfApprovalRatePercent)%)" (New-DeltaHtml -Current $agg.selfApprovalRatePercent -Previous $prev.selfApprovalRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
-    (New-MetricRow 'Merged with no approving reviewer' "$($agg.noApprovalMergedCount) ($($agg.noApprovalMergedRatePercent)% of merges)" (New-DeltaHtml -Current $agg.noApprovalMergedRatePercent -Previous $prev.noApprovalMergedRatePercent -Suffix 'pp' -PeriodLabel $cmp))
-) -join "`n"
+$workItemRows = (@(foreach ($bucket in $agg.workItemBucketTotals.Keys) {
+    $assigned = $agg.workItemBucketTotals[$bucket].assigned
+    if ($assigned -eq 0 -and $bucket -eq 'Other') { continue }
+    $completed = $agg.workItemBucketTotals[$bucket].completed
+    New-MetricRow $bucket "$completed of $assigned completed" ''
+}) -join "`n")
+if (-not $workItemRows) { $workItemRows = '<tr><td colspan="2" class="empty">No work-item data supplied for this period.</td></tr>' }
 
 $distRows = @(
     (New-MetricRow 'Members who raised at least one PR' "$($agg.contributorCount) of $($agg.memberCount)" ''),
@@ -439,15 +437,13 @@ $memberTableRows = (@(
         $raised   = (@($rows | ForEach-Object { [int]$_.totalRaised }) | Measure-Object -Sum).Sum
         $merged   = (@($rows | ForEach-Object { [int]$_.mergedToMaster }) | Measure-Object -Sum).Sum
         $comments = (@($rows | ForEach-Object { [int]$_.totalComments }) | Measure-Object -Sum).Sum
-        $selfApp  = (@($rows | ForEach-Object { [int]$_.selfApprovalCount }) | Measure-Object -Sum).Sum
-        $noAppr   = (@($rows | ForEach-Object { [int]$_.noApprovalMergedCount }) | Measure-Object -Sum).Sum
+        $reviewed = (@($rows | ForEach-Object { [int]$_.reviewedCount }) | Measure-Object -Sum).Sum
+        $wiAssigned = (@($rows | ForEach-Object { [int]$_.totalWorkItemsAssigned }) | Measure-Object -Sum).Sum
+        $wiCompleted = (@($rows | ForEach-Object { [int]$_.totalWorkItemsCompleted }) | Measure-Object -Sum).Sum
         $largePr  = (@($rows | ForEach-Object { [int]$_.largePrCount }) | Measure-Object -Sum).Sum
         $vague    = (@($rows | ForEach-Object { [int]$_.vagueCommitCount }) | Measure-Object -Sum).Sum
-        $medians  = @($rows | Where-Object { $null -ne $_.medianCycleTimeHours } | ForEach-Object { [double]$_.medianCycleTimeHours })
-        $scores   = @($rows | Where-Object { $null -ne $_.qualityScore } | ForEach-Object { [double]$_.qualityScore })
+        $medians  = @($rows | Where-Object { $null -ne $_.medianCycleTimeDays } | ForEach-Object { [double]$_.medianCycleTimeDays })
         $chips = ''
-        if ($selfApp -gt 0) { $chips += (New-Chip 'critical' "$selfApp self-approved") }
-        if ($noAppr -gt 0)  { $chips += (New-Chip 'critical' "$noAppr no-approval merge") }
         if ($largePr -gt 0) { $chips += (New-Chip 'warning' "$largePr large PR") }
         if ($vague -gt 0)   { $chips += (New-Chip 'serious' "$vague vague commits") }
 
@@ -455,9 +451,10 @@ $memberTableRows = (@(
         '<td class="num">' + $rows.Count + '</td>' +
         '<td class="num">' + $raised + '</td>' +
         '<td class="num">' + $merged + '</td>' +
-        '<td class="num">' + (Format-Metric (Get-Median -Values $medians) ' h') + '</td>' +
+        '<td class="num">' + (Format-Metric (Get-Median -Values $medians) ' d') + '</td>' +
         '<td class="num">' + $comments + '</td>' +
-        '<td class="num">' + (Format-Metric $(if ($scores.Count -gt 0) { [math]::Round(($scores | Measure-Object -Average).Average, 1) } else { $null })) + '</td>' +
+        '<td class="num">' + $reviewed + '</td>' +
+        '<td class="num">' + $wiCompleted + ' / ' + $wiAssigned + '</td>' +
         '<td>' + $chips + '</td></tr>'
     }
 ) -join "`n")
@@ -469,23 +466,6 @@ $gapSection = if ($agg.gaps.Count -eq 0) {
         '<li>' + (ConvertTo-HtmlText $_.email) + ' &mdash; ' + (ConvertTo-HtmlText $_.month) + '</li>'
     }) -join "`n")
     '<p class="callout"><strong>' + $agg.gaps.Count + ' member-months have no collected data.</strong> These are counted as missing, not as zero. Collect the raw JSON for them before reading anything into the totals below.</p><ul class="flag-list">' + $items + '</ul>'
-}
-
-$govFlagRows = (@(
-    foreach ($entry in ($agg.allPrs | Where-Object { $_.pr.selfApprovalFlag -or $_.pr.noApprovalMergedFlag })) {
-        $pr = $entry.pr
-        $chips = ''
-        if ($pr.selfApprovalFlag)     { $chips += (New-Chip 'critical' 'self-approved') }
-        if ($pr.noApprovalMergedFlag) { $chips += (New-Chip 'critical' 'no approval') }
-        $titleCell = if ($pr.url) { '<a href="' + (ConvertTo-HtmlText $pr.url) + '">' + (ConvertTo-HtmlText $pr.title) + '</a>' } else { ConvertTo-HtmlText $pr.title }
-        '<tr><td class="num">' + $pr.pullRequestId + '</td><td class="title">' + $titleCell + '</td>' +
-        '<td>' + (ConvertTo-HtmlText $entry.person) + '</td><td>' + (ConvertTo-HtmlText $entry.monthYear) + '</td><td>' + $chips + '</td></tr>'
-    }
-) -join "`n")
-$govFlagSection = if (-not $govFlagRows) {
-    '<p class="empty">No self-approvals or no-approval merges anywhere in the team this period.</p>'
-} else {
-    '<div class="scroll"><table><thead><tr><th>PR</th><th>Title</th><th>Author</th><th>Month</th><th>Flag</th></tr></thead><tbody>' + $govFlagRows + '</tbody></table></div>'
 }
 
 $monthsCovered = ($months -join ', ')
@@ -516,15 +496,6 @@ $htmlTemplate = @'
     <p class="stamp">Generated {{GENERATED}} &middot; {{TREND_NOTE}}</p>
   </header>
 
-  <div class="hero">
-    <p class="hero-value">{{SCORE}}</p>
-    <div>
-      <p class="hero-label">Team composite score, out of 100</p>
-      {{SCORE_DELTA}}
-    </div>
-    <p class="hero-note">Computed from the team's pooled totals, not by averaging individual scores. It is a conversation starter for a retro, not a rating of the team or anyone in it.</p>
-  </div>
-
   <section>
     <h2>Team performance</h2>
     <div class="tiles">
@@ -546,8 +517,8 @@ $htmlTemplate = @'
       <table class="metrics"><tbody>{{HYGIENE_ROWS}}</tbody></table>
     </div>
     <div>
-      <h2>Governance risk</h2>
-      <table class="metrics"><tbody>{{GOV_ROWS}}</tbody></table>
+      <h2>Work items assigned</h2>
+      <table class="metrics"><tbody>{{WORK_ITEM_ROWS}}</tbody></table>
     </div>
   </section>
 
@@ -559,21 +530,16 @@ $htmlTemplate = @'
 
   <section>
     <h2>Per member</h2>
-    <p class="callout callout-info">Listed <strong>alphabetically, deliberately</strong>. Sorting this table by PR count or score turns it into a ranking, and PR counts measure ticket sizing far more than they measure contribution. Each person's own report holds the detail and the review comments behind these numbers.</p>
+    <p class="callout callout-info">Listed <strong>alphabetically, deliberately</strong>. Sorting this table by PR count turns it into a ranking, and PR counts measure ticket sizing far more than they measure contribution. Each person's own report holds the detail and the review comments behind these numbers.</p>
     <div class="scroll">
       <table>
         <thead><tr>
           <th>Member</th><th>Months with data</th><th>PRs raised</th><th>Merged</th>
-          <th>Median cycle h</th><th>Comments</th><th>Avg score</th><th>Flags</th>
+          <th>Median cycle d</th><th>Comments</th><th>PRs reviewed</th><th>Work items done/assigned</th><th>Flags</th>
         </tr></thead>
         <tbody>{{MEMBER_ROWS}}</tbody>
       </table>
     </div>
-  </section>
-
-  <section>
-    <h2>Governance flags across the team</h2>
-    {{GOV_FLAGS}}
   </section>
 
   <section>
@@ -600,16 +566,13 @@ $html = $htmlTemplate.
     Replace('{{MONTHS}}',        (ConvertTo-HtmlText $monthsCovered)).
     Replace('{{GENERATED}}',     (ConvertTo-HtmlText ((Get-Date).ToString('yyyy-MM-dd HH:mm')))).
     Replace('{{TREND_NOTE}}',    (ConvertTo-HtmlText $trendNote)).
-    Replace('{{SCORE}}',         "$($agg.teamQualityScore)").
-    Replace('{{SCORE_DELTA}}',   (New-DeltaHtml -Current $agg.teamQualityScore -Previous $prev.teamQualityScore -HigherIsBetter -PeriodLabel $cmp)).
     Replace('{{TILES}}',         $tiles).
     Replace('{{DELIVERY_ROWS}}', $deliveryRows).
     Replace('{{REVIEW_ROWS}}',   $reviewRows).
     Replace('{{HYGIENE_ROWS}}',  $hygieneRows).
-    Replace('{{GOV_ROWS}}',      $govRows).
+    Replace('{{WORK_ITEM_ROWS}}', $workItemRows).
     Replace('{{DIST_ROWS}}',     $distRows).
     Replace('{{MEMBER_ROWS}}',   $memberTableRows).
-    Replace('{{GOV_FLAGS}}',     $govFlagSection).
     Replace('{{GAPS}}',          $gapSection)
 
 $htmlPath = Join-Path $OutputDir "$safeTeam-$periodSlug-team.html"
@@ -620,5 +583,5 @@ Write-Host "Team report:  $htmlPath"
 Write-Host "Members CSV:  $membersCsvPath"
 Write-Host "Team PRs CSV: $teamPrsCsvPath"
 Write-Host "Team ledger:  $teamLedgerPath"
-Write-Host ("PRs raised: {0}, Merged: {1} ({2}%), Team score: {3}, Coverage gaps: {4}" -f `
-    $agg.totalRaised, $agg.mergedToMaster, $agg.mergeRatePercent, $agg.teamQualityScore, $agg.gaps.Count)
+Write-Host ("PRs raised: {0}, Merged: {1} ({2}%), Reviewed: {3}, Work items: {4} ({5} completed), Coverage gaps: {6}" -f `
+    $agg.totalRaised, $agg.mergedToMaster, $agg.mergeRatePercent, $agg.reviewedCount, $agg.totalWorkItemsAssigned, $agg.totalWorkItemsCompleted, $agg.gaps.Count)

@@ -38,7 +38,7 @@
               ]
             }
           ],
-          // --- optional fields enabling size/churn, self-approval and commit-hygiene metrics ---
+          // --- optional fields enabling size/churn and commit-hygiene metrics ---
           "filesChangedCount": 3,          // from azure-devops-repo_pull_request action=get_changes
           "linesAdded": 45,                // sum of added lines across get_changes files
           "linesDeleted": 12,              // sum of deleted lines across get_changes files
@@ -55,6 +55,40 @@
               "comment": "Add null check for missing shipping address"
             }
           ]
+        }
+      ],
+      // --- optional: PRs authored by OTHERS where this person acted as a reviewer ---
+      "reviewedPullRequests": [
+        {
+          "pullRequestId": 789,
+          "title": "Add retry to payment webhook",
+          "url": "https://dev.azure.com/.../pullrequest/789",
+          "author": "John Author",
+          "vote": 10,          // 10=Approved, 5=Approved with suggestions, 0=No vote, -5=Waiting, -10=Rejected
+          "filesChangedCount": 4,   // optional, shows in "Files" column; omit if unavailable
+          "linesAdded": 60,         // optional, shows in "Lines" column with linesDeleted
+          "linesDeleted": 10        // optional
+        }
+      ],
+      // --- optional: work items (of any type) assigned to this person during the month ---
+      "workItems": [
+        {
+          "id": 456,
+          "type": "Bug",       // Bug | User Story | Task | Epic | Feature | (anything else -> "Other")
+          "state": "Closed",   // any ADO state string; Closed/Done/Resolved/Completed count as completed,
+                               // Code Review/In Review/Ready for Review count as "in code review",
+                               // Removed/Cancelled are excluded from every count entirely
+          "title": "Null ref in order export",
+          // --- optional fields enabling Epic/Feature activity gating and stale-in-queue detection ---
+          "changedDate": "2025-07-20T09:00:00Z",   // last time state/fields changed; needed to flag Bugs/
+                                                     // User Stories sitting untouched (see StaleWorkItemDaysThreshold)
+          "assignedDate": "2025-07-10T09:00:00Z",   // when the item was assigned to this person; needed for
+                                                     // the "avg work item age" metric (assigned -> closed).
+                                                     // Omit if unknown - that item is simply excluded from the average.
+          "childUserStoryCount": 3                  // Epic/Feature only: count of User Stories under this item
+                                                     // (Epic: rolled up across its Features; Feature: direct
+                                                     // children). An Epic/Feature with 0 (or omitted) is never
+                                                     // counted as active, regardless of its ADO state.
         }
       ]
     }
@@ -80,6 +114,20 @@
 .PARAMETER VagueCommitMinLength
     Commit messages (first line) with fewer non-whitespace characters than this are
     flagged as vague, in addition to the known-phrase pattern list. Default 10.
+
+.PARAMETER StalePrDaysThreshold
+    Business days (Mon-Fri) a still-active (not closed) PR can sit open before it
+    is flagged as "stuck" - both in the per-PR table chip and the PR hygiene count.
+    Default 5.
+
+.PARAMETER HighCycleTimeDaysThreshold
+    Business days (Mon-Fri) above which a PR's cycle time (closed) or age (still
+    active) counts toward the "PRs with high cycle time" headline tile. Default 10.
+
+.PARAMETER StaleWorkItemDaysThreshold
+    Business days (Mon-Fri) a Bug or User Story assigned to the person can sit
+    with no state change before it's flagged as "stuck in queue". Requires the
+    optional "changedDate" field on each work item. Default 5.
 
 .PARAMETER TalkingPointsPath
     Optional path to a plain-text/Markdown file holding the confirmed talking points
@@ -115,6 +163,12 @@ param(
 
     [int]$VagueCommitMinLength = 10,
 
+    [int]$StalePrDaysThreshold = 5,
+
+    [int]$HighCycleTimeDaysThreshold = 10,
+
+    [int]$StaleWorkItemDaysThreshold = 5,
+
     [string]$TalkingPointsPath
 )
 
@@ -140,6 +194,8 @@ $person = $data.person
 $monthYear = $data.monthYear
 $targetMasterBranch = if ($data.targetMasterBranch) { $data.targetMasterBranch } else { 'refs/heads/master' }
 $pullRequests = @($data.pullRequests)
+$reviewedPullRequests = @($data.reviewedPullRequests)
+$workItems = @($data.workItems)
 
 # ---- Keyword sets for candidate comment flagging (heuristics only, not final judgment) ----
 $keywordCategories = [ordered]@{
@@ -204,19 +260,17 @@ $prResults = New-Object System.Collections.Generic.List[object]
 $totalRaised = 0
 $mergedToMaster = 0
 $abandonedCount = 0
-$cycleTimeHoursList = New-Object System.Collections.Generic.List[double]
+$cycleTimeDaysList = New-Object System.Collections.Generic.List[double]
 $reviewerSet = New-Object System.Collections.Generic.HashSet[string]
 $totalComments = 0
-$totalThreads = 0
-$resolvedThreads = 0
 $categoryTotals = [ordered]@{}
 foreach ($cat in $keywordCategories.Keys) { $categoryTotals[$cat] = 0 }
 $totalLinesAdded = 0
 $totalLinesDeleted = 0
-$totalFilesChanged = 0
 $largePrCount = 0
-$selfApprovalCount = 0
-$noApprovalMergedCount = 0
+$activePrCount = 0
+$stalePrCount = 0
+$highCycleTimePrCount = 0
 $totalCommits = 0
 $vagueCommitCount = 0
 $reworkCommitTotal = 0
@@ -231,16 +285,41 @@ foreach ($pr in $pullRequests) {
     if ($isMergedToMaster) { $mergedToMaster++ }
     if ($pr.status -ieq 'abandoned') { $abandonedCount++ }
 
-    # Cycle time: creation -> closed, in hours (any closed PR, not just merged-to-master)
-    $cycleTimeHours = $null
+    # Cycle time: creation -> closed, in business days (Mon-Fri only; weekend time
+    # is excluded rather than counted, so a PR idle over a weekend isn't scored
+    # as if it moved faster). Any closed PR, not just merged-to-master.
+    $cycleTimeDays = $null
     if ($pr.creationDate -and $pr.closedDate) {
         try {
             $created = [datetime]$pr.creationDate
             $closed = [datetime]$pr.closedDate
-            $cycleTimeHours = [math]::Round(($closed - $created).TotalHours, 1)
-            if ($isMergedToMaster) { $cycleTimeHoursList.Add($cycleTimeHours) }
-        } catch { $cycleTimeHours = $null }
+            $cycleTimeDays = [math]::Round((Get-BusinessDaysBetween -Start $created -End $closed), 1)
+            if ($isMergedToMaster) { $cycleTimeDaysList.Add($cycleTimeDays) }
+        } catch { $cycleTimeDays = $null }
     }
+
+    # Age of still-open PRs: creation -> now, in business days. This is the number
+    # a reviewer actually needs in a 1-1 - "it's been sitting for N days, why?" -
+    # cycle time only exists once a PR closes, so an open PR needs its own clock.
+    $isActive = ($pr.status -ieq 'active')
+    $ageDays = $null
+    $stalePrFlag = $false
+    if ($isActive -and $pr.creationDate) {
+        try {
+            $created = [datetime]$pr.creationDate
+            $ageDays = [math]::Round((Get-BusinessDaysBetween -Start $created -End (Get-Date)), 1)
+            $stalePrFlag = ($ageDays -ge $StalePrDaysThreshold)
+        } catch { $ageDays = $null }
+    }
+    if ($isActive) { $activePrCount++ }
+    if ($stalePrFlag) { $stalePrCount++ }
+
+    # High cycle time: use cycle time once closed, or current age while still
+    # open - either way, this is "has this PR been slow", not just "is it stuck
+    # right now" (stalePrFlag/StalePrDaysThreshold is about active PRs only).
+    $effectiveDurationDays = if ($null -ne $cycleTimeDays) { $cycleTimeDays } else { $ageDays }
+    $highCycleTimeFlag = ($null -ne $effectiveDurationDays) -and ($effectiveDurationDays -gt $HighCycleTimeDaysThreshold)
+    if ($highCycleTimeFlag) { $highCycleTimePrCount++ }
 
     $descriptionFlag = Test-DescriptionFlag -Description $pr.description -MinLength $DescriptionMinLength
     $workItemCount = if ($pr.workItemRefs) { @($pr.workItemRefs).Count } else { 0 }
@@ -251,10 +330,8 @@ foreach ($pr in $pullRequests) {
     $prThreads = @()
     if ($pr.threads) { $prThreads = @($pr.threads) }
     $prThreadCount = $prThreads.Count
-    $totalThreads += $prThreadCount
     $firstCommentDate = $null
     foreach ($thread in $prThreads) {
-        if ($thread.status -in @('closed', 'fixed')) { $resolvedThreads++ }
         foreach ($comment in @($thread.comments)) {
             $content = [string]$comment.content
             if ([string]::IsNullOrWhiteSpace($content)) { continue }
@@ -295,23 +372,13 @@ foreach ($pr in $pullRequests) {
     $largePrFlag = ($churn -ge $LargeChurnThreshold) -or ($filesChangedCount -ge $LargeFileCountThreshold)
     $totalLinesAdded += $linesAdded
     $totalLinesDeleted += $linesDeleted
-    $totalFilesChanged += $filesChangedCount
     if ($largePrFlag) { $largePrCount++ }
 
-    # ---- Reviewer self-approval detection ----
+    # ---- Reviewers (approvals shown in the per-PR table; no self/no-approval flags) ----
     $reviewers = @()
     if ($pr.reviewers) { $reviewers = @($pr.reviewers) }
     $reviewersCount = $reviewers.Count
     $approvedCount = @($reviewers | Where-Object { $_.vote -ge 5 }).Count
-    $selfApprovalFlag = $false
-    foreach ($rev in $reviewers) {
-        $revId = @($rev.uniqueName, $rev.displayName) | Where-Object { $_ } | Select-Object -First 1
-        if ($revId -and $person -and ($revId -ieq $person -or $revId -like "*$person*") -and $rev.vote -ge 5) {
-            $selfApprovalFlag = $true
-        }
-    }
-    if ($selfApprovalFlag) { $selfApprovalCount++ }
-    if ($isMergedToMaster -and $reviewersCount -gt 0 -and $approvedCount -eq 0) { $noApprovalMergedCount++ }
 
     # ---- Commits: vague-message detection + rework-after-first-comment count ----
     $commits = @()
@@ -357,7 +424,11 @@ foreach ($pr in $pullRequests) {
         targetRefName       = $pr.targetRefName
         creationDate        = $pr.creationDate
         closedDate          = $pr.closedDate
-        cycleTimeHours      = $cycleTimeHours
+        cycleTimeDays       = $cycleTimeDays
+        isActive            = $isActive
+        ageDays             = $ageDays
+        stalePrFlag         = $stalePrFlag
+        highCycleTimeFlag   = $highCycleTimeFlag
         mergedToMaster      = $isMergedToMaster
         descriptionFlag     = $descriptionFlag
         noWorkItemFlag      = $noWorkItemFlag
@@ -373,8 +444,6 @@ foreach ($pr in $pullRequests) {
         largePrFlag         = $largePrFlag
         reviewersCount      = $reviewersCount
         approvedCount       = $approvedCount
-        selfApprovalFlag    = $selfApprovalFlag
-        noApprovalMergedFlag = ($isMergedToMaster -and $reviewersCount -gt 0 -and $approvedCount -eq 0)
         commitCount         = $prCommitCount
         vagueCommitCount    = $prVagueCommits.Count
         vagueCommits        = $prVagueCommits
@@ -383,10 +452,9 @@ foreach ($pr in $pullRequests) {
 }
 
 # ---- Aggregate quantitative metrics ----
-$avgCycleTimeHours = if ($cycleTimeHoursList.Count -gt 0) { [math]::Round(($cycleTimeHoursList | Measure-Object -Average).Average, 1) } else { $null }
-$medianCycleTimeHours = Get-Median -Values @($cycleTimeHoursList)
+$avgCycleTimeDays = if ($cycleTimeDaysList.Count -gt 0) { [math]::Round(($cycleTimeDaysList | Measure-Object -Average).Average, 1) } else { $null }
+$medianCycleTimeDays = Get-Median -Values @($cycleTimeDaysList)
 $abandonRatePercent = if ($totalRaised -gt 0) { [math]::Round(100 * $abandonedCount / $totalRaised, 1) } else { 0 }
-$threadResolutionPercent = if ($totalThreads -gt 0) { [math]::Round(100 * $resolvedThreads / $totalThreads, 1) } else { $null }
 $avgCommentsPerPr = if ($totalRaised -gt 0) { [math]::Round($totalComments / $totalRaised, 1) } else { 0 }
 $noWorkItemCount = @($prResults | Where-Object { $_.noWorkItemFlag }).Count
 $descriptionFlagCount = @($prResults | Where-Object { $_.descriptionFlag }).Count
@@ -396,25 +464,49 @@ $descriptionFlagRatePercent = if ($totalRaised -gt 0) { [math]::Round(100 * $des
 $commentFlagRatePercent = if ($totalRaised -gt 0) { [math]::Round(100 * $anyCommentFlagCount / $totalRaised, 1) } else { 0 }
 $reviewerDiversityCount = $reviewerSet.Count
 
-# ---- PR size/churn, self-approval and commit-hygiene aggregates ----
-$avgChurnPerPr = if ($totalRaised -gt 0) { [math]::Round(($totalLinesAdded + $totalLinesDeleted) / $totalRaised, 1) } else { 0 }
+# ---- PR size/churn and commit-hygiene aggregates ----
 $largePrRatePercent = if ($totalRaised -gt 0) { [math]::Round(100 * $largePrCount / $totalRaised, 1) } else { 0 }
-$selfApprovalRatePercent = if ($totalRaised -gt 0) { [math]::Round(100 * $selfApprovalCount / $totalRaised, 1) } else { 0 }
-$noApprovalMergedRatePercent = if ($mergedToMaster -gt 0) { [math]::Round(100 * $noApprovalMergedCount / $mergedToMaster, 1) } else { 0 }
 $vagueCommitRatePercent = if ($totalCommits -gt 0) { [math]::Round(100 * $vagueCommitCount / $totalCommits, 1) } else { 0 }
 $avgReworkCommitsPerPr = if ($prsWithReworkData -gt 0) {
     [math]::Round((@($prResults | Where-Object { $null -ne $_.reworkCommitCount } | ForEach-Object { $_.reworkCommitCount }) | Measure-Object -Sum).Sum / $prsWithReworkData, 1)
 } else { $null }
 
-# Composite quality score (0-100): rewards merging, resolving threads, complete descriptions/work items,
-# reasonable PR size, real self-review approvals, and descriptive commit messages; penalizes flags.
-$mergeRateForScore = if ($totalRaised -gt 0) { 100 * $mergedToMaster / $totalRaised } else { 0 }
-$threadResForScore = if ($null -ne $threadResolutionPercent) { $threadResolutionPercent } else { 100 }
-$hygieneScore = 100 - (($noWorkItemRatePercent + $descriptionFlagRatePercent + $commentFlagRatePercent + $largePrRatePercent + $vagueCommitRatePercent) / 5)
-if ($hygieneScore -lt 0) { $hygieneScore = 0 }
-$governanceScore = 100 - (($selfApprovalRatePercent * 2) + $noApprovalMergedRatePercent) # self-approval weighted heavier - governance red flag
-if ($governanceScore -lt 0) { $governanceScore = 0 }
-$qualityScore = [math]::Round((0.35 * $mergeRateForScore) + (0.25 * $threadResForScore) + (0.25 * $hygieneScore) + (0.15 * $governanceScore), 1)
+# ---- PRs reviewed by this person (authored by someone else) ----
+$reviewedCount = $reviewedPullRequests.Count
+$reviewedApprovedCount = @($reviewedPullRequests | Where-Object { $_.vote -ge 5 }).Count
+
+# ---- Work items assigned to this person, by type, with completed count ----
+$workItemSummary = Get-WorkItemSummary -WorkItems $workItems
+$totalWorkItemsAssigned = (@($workItemSummary.Values | ForEach-Object { $_.assigned }) | Measure-Object -Sum).Sum
+$totalWorkItemsCompleted = (@($workItemSummary.Values | ForEach-Object { $_.completed }) | Measure-Object -Sum).Sum
+
+# ---- Richer per-type breakdown (count / active / code review / completed), plus
+# Bugs and User Stories sitting untouched in the queue for too long. JSON-only for
+# now - not yet wired into the HTML report pending the SM's redesign of that section. ----
+$workItemTypeStats = Get-WorkItemTypeStats -WorkItems $workItems
+$staleBugItems = @(Get-StaleWorkItems -WorkItems $workItems -Bucket 'Bug' -ThresholdDays $StaleWorkItemDaysThreshold)
+$staleUserStoryItems = @(Get-StaleWorkItems -WorkItems $workItems -Bucket 'User Story' -ThresholdDays $StaleWorkItemDaysThreshold)
+$staleBugCount = $staleBugItems.Count
+$staleUserStoryCount = $staleUserStoryItems.Count
+$stuckInQueueCount = $staleBugCount + $staleUserStoryCount
+
+# ---- Avg work item age: assignedDate -> changedDate (closed), business days.
+# Only counts items that are actually completed and have both dates supplied -
+# an item missing "assignedDate" is excluded rather than guessed at. ----
+$workItemAgeDaysList = New-Object System.Collections.Generic.List[double]
+foreach ($wi in $workItems) {
+    if (-not (Test-WorkItemDone -State $wi.state)) { continue }
+    if (-not $wi.assignedDate -or -not $wi.changedDate) { continue }
+    try {
+        $assigned = [datetime]$wi.assignedDate
+        $closedOn = [datetime]$wi.changedDate
+        $workItemAgeDaysList.Add((Get-BusinessDaysBetween -Start $assigned -End $closedOn)) | Out-Null
+    } catch { }
+}
+$avgWorkItemAgeDays = if ($workItemAgeDaysList.Count -gt 0) {
+    [math]::Round(($workItemAgeDaysList | Measure-Object -Average).Average, 1)
+} else { $null }
+$workItemsWithAgeData = $workItemAgeDaysList.Count
 
 $summary = [pscustomobject]@{
     person                       = $person
@@ -424,11 +516,8 @@ $summary = [pscustomobject]@{
     mergeRatePercent             = if ($totalRaised -gt 0) { [math]::Round(100 * $mergedToMaster / $totalRaised, 1) } else { 0 }
     abandonedCount               = $abandonedCount
     abandonRatePercent           = $abandonRatePercent
-    avgCycleTimeHours            = $avgCycleTimeHours
-    medianCycleTimeHours         = $medianCycleTimeHours
-    totalThreads                 = $totalThreads
-    resolvedThreads              = $resolvedThreads
-    threadResolutionPercent      = $threadResolutionPercent
+    avgCycleTimeDays             = $avgCycleTimeDays
+    medianCycleTimeDays          = $medianCycleTimeDays
     totalComments                = $totalComments
     avgCommentsPerPr             = $avgCommentsPerPr
     reviewerDiversityCount       = $reviewerDiversityCount
@@ -440,20 +529,30 @@ $summary = [pscustomobject]@{
     commentFlagCategoryTotals    = $categoryTotals
     totalLinesAdded              = $totalLinesAdded
     totalLinesDeleted            = $totalLinesDeleted
-    totalFilesChanged            = $totalFilesChanged
-    avgChurnPerPr                = $avgChurnPerPr
     largePrCount                 = $largePrCount
     largePrRatePercent           = $largePrRatePercent
-    selfApprovalCount            = $selfApprovalCount
-    selfApprovalRatePercent      = $selfApprovalRatePercent
-    noApprovalMergedCount        = $noApprovalMergedCount
-    noApprovalMergedRatePercent  = $noApprovalMergedRatePercent
+    activePrCount                = $activePrCount
+    stalePrCount                 = $stalePrCount
+    highCycleTimePrCount         = $highCycleTimePrCount
     totalCommits                 = $totalCommits
     vagueCommitCount             = $vagueCommitCount
     vagueCommitRatePercent       = $vagueCommitRatePercent
     avgReworkCommitsPerPr        = $avgReworkCommitsPerPr
-    qualityScore                 = $qualityScore
+    reviewedCount                 = $reviewedCount
+    reviewedApprovedCount         = $reviewedApprovedCount
+    totalWorkItemsAssigned        = $totalWorkItemsAssigned
+    totalWorkItemsCompleted       = $totalWorkItemsCompleted
+    workItemSummary               = $workItemSummary
+    workItemTypeStats             = $workItemTypeStats
+    staleBugCount                 = $staleBugCount
+    staleUserStoryCount           = $staleUserStoryCount
+    stuckInQueueCount             = $stuckInQueueCount
+    staleBugItems                 = $staleBugItems
+    staleUserStoryItems           = $staleUserStoryItems
+    avgWorkItemAgeDays            = $avgWorkItemAgeDays
+    workItemsWithAgeData          = $workItemsWithAgeData
     pullRequests                 = $prResults
+    reviewedPullRequests          = $reviewedPullRequests
     generatedAtUtc               = (Get-Date).ToUniversalTime().ToString('o')
 }
 
@@ -465,8 +564,14 @@ $ledgerPath  = Join-Path $OutputDir 'kpi-ledger.csv'
 
 # ---- Month-over-month trend: look for the immediately preceding month's summary for this person ----
 $previousSummary = $null
+$monthLabel = $monthYear
+$periodRangeLabel = $monthYear
 try {
     $ym = [datetime]::ParseExact($monthYear, 'yyyy-MM', $null)
+    $monthLabel = $ym.ToString('MMMM yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+    $periodStart = $ym
+    $periodEnd = $ym.AddMonths(1).AddDays(-1)
+    $periodRangeLabel = "$($periodStart.ToString('d MMM')) - $($periodEnd.ToString('d MMM yyyy'))"
     $prevYm = $ym.AddMonths(-1).ToString('yyyy-MM')
     $prevPath = Join-Path $OutputDir "$safePerson-$prevYm-summary.json"
     if (Test-Path $prevPath) {
@@ -475,9 +580,6 @@ try {
 } catch { $previousSummary = $null }
 
 $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $summaryPath -Encoding UTF8
-
-$selfApprovalPrs = @($prResults | Where-Object { $_.selfApprovalFlag })
-$noApprovalPrs = @($prResults | Where-Object { $_.noApprovalMergedFlag })
 
 # ===========================================================================
 #  CSV OUTPUT 1 - per-PR detail. Fixed column template; one row per PR.
@@ -494,7 +596,10 @@ $prCsvRows = foreach ($pr in $prResults) {
         creationDate       = $pr.creationDate
         closedDate         = $pr.closedDate
         mergedToMaster     = $pr.mergedToMaster
-        cycleTimeHours     = $pr.cycleTimeHours
+        cycleTimeDays      = $pr.cycleTimeDays
+        isActive           = $pr.isActive
+        ageDays            = $pr.ageDays
+        stalePrFlag        = $pr.stalePrFlag
         workItemCount      = $pr.workItemCount
         noWorkItemFlag     = $pr.noWorkItemFlag
         descriptionFlag    = $pr.descriptionFlag
@@ -508,8 +613,6 @@ $prCsvRows = foreach ($pr in $prResults) {
         largePrFlag        = $pr.largePrFlag
         reviewersCount     = $pr.reviewersCount
         approvedCount      = $pr.approvedCount
-        selfApprovalFlag   = $pr.selfApprovalFlag
-        noApprovalMergedFlag = $pr.noApprovalMergedFlag
         commitCount        = $pr.commitCount
         vagueCommitCount   = $pr.vagueCommitCount
         reworkCommitCount  = $pr.reworkCommitCount
@@ -522,18 +625,20 @@ $prCsvRows = foreach ($pr in $prResults) {
 #  Re-running a month replaces that month's row rather than duplicating it.
 # ===========================================================================
 $ledgerColumns = @(
-    'person', 'monthYear', 'generatedAtUtc', 'qualityScore',
+    'person', 'monthYear', 'generatedAtUtc',
     'totalRaised', 'mergedToMaster', 'mergeRatePercent', 'abandonedCount', 'abandonRatePercent',
-    'avgCycleTimeHours', 'medianCycleTimeHours',
-    'totalThreads', 'resolvedThreads', 'threadResolutionPercent',
+    'avgCycleTimeDays', 'medianCycleTimeDays',
     'totalComments', 'avgCommentsPerPr', 'reviewerDiversityCount',
     'noWorkItemCount', 'noWorkItemRatePercent',
     'descriptionFlagCount', 'descriptionFlagRatePercent', 'commentFlagRatePercent',
-    'totalLinesAdded', 'totalLinesDeleted', 'totalFilesChanged', 'avgChurnPerPr',
+    'totalLinesAdded', 'totalLinesDeleted',
     'largePrCount', 'largePrRatePercent',
-    'selfApprovalCount', 'selfApprovalRatePercent',
-    'noApprovalMergedCount', 'noApprovalMergedRatePercent',
-    'totalCommits', 'vagueCommitCount', 'vagueCommitRatePercent', 'avgReworkCommitsPerPr'
+    'activePrCount', 'stalePrCount', 'highCycleTimePrCount',
+    'totalCommits', 'vagueCommitCount', 'vagueCommitRatePercent', 'avgReworkCommitsPerPr',
+    'reviewedCount', 'reviewedApprovedCount',
+    'totalWorkItemsAssigned', 'totalWorkItemsCompleted',
+    'staleBugCount', 'staleUserStoryCount', 'stuckInQueueCount',
+    'avgWorkItemAgeDays', 'workItemsWithAgeData'
 )
 $ledgerRow = [pscustomobject][ordered]@{}
 foreach ($col in $ledgerColumns) {
@@ -559,39 +664,128 @@ $ledgerRows |
 #  so every report for every person and month has the same shape.
 # ===========================================================================
 
-# ---- headline tiles ----
+# ---- headline tiles: the numbers a 1-1 opens with ----
 $tiles = @(
     (New-Tile -Label 'PRs raised' -Value "$totalRaised" `
         -DeltaHtml (New-DeltaHtml -Current $totalRaised -Previous $previousSummary.totalRaised -HigherIsBetter)),
     (New-Tile -Label 'Merged to master' -Value "$mergedToMaster" -Note "$($summary.mergeRatePercent)% of PRs raised" `
         -DeltaHtml (New-DeltaHtml -Current $summary.mergeRatePercent -Previous $previousSummary.mergeRatePercent -HigherIsBetter -Suffix 'pp')),
-    (New-Tile -Label 'Median cycle time' -Value (Format-Metric $medianCycleTimeHours ' h') -Note (Format-Metric $avgCycleTimeHours ' h average' 'n/a') `
-        -DeltaHtml (New-DeltaHtml -Current $avgCycleTimeHours -Previous $previousSummary.avgCycleTimeHours -Suffix 'h')),
-    (New-Tile -Label 'Threads resolved' -Value (Format-Metric $threadResolutionPercent '%') -Note "$resolvedThreads of $totalThreads threads" `
-        -DeltaHtml (New-DeltaHtml -Current $threadResolutionPercent -Previous $previousSummary.threadResolutionPercent -HigherIsBetter -Suffix 'pp')),
+    (New-Tile -Label "Active PR's" -Value "$activePrCount" -Note $(if ($stalePrCount -gt 0) { "$stalePrCount stuck $StalePrDaysThreshold+ business days" } else { 'none stuck open' }) `
+        -DeltaHtml (New-DeltaHtml -Current $activePrCount -Previous $previousSummary.activePrCount)),
+    (New-Tile -Label 'Median cycle time' -Value (Format-Metric $medianCycleTimeDays ' d') -Note (Format-Metric $avgCycleTimeDays ' d average' 'n/a') `
+        -DeltaHtml (New-DeltaHtml -Current $avgCycleTimeDays -Previous $previousSummary.avgCycleTimeDays -Suffix 'd')),
+    (New-Tile -Label "PR's with high cycle time" -Value "$highCycleTimePrCount" -Note "> $HighCycleTimeDaysThreshold business days (open or closed)" `
+        -DeltaHtml (New-DeltaHtml -Current $highCycleTimePrCount -Previous $previousSummary.highCycleTimePrCount)),
     (New-Tile -Label 'Review comments' -Value "$totalComments" -Note "avg $avgCommentsPerPr per PR" `
         -DeltaHtml (New-DeltaHtml -Current $avgCommentsPerPr -Previous $previousSummary.avgCommentsPerPr -Suffix '/PR')),
-    (New-Tile -Label 'Reviewers engaged' -Value "$reviewerDiversityCount" -Note 'distinct people who commented')
+    (New-Tile -Label "Reviewed PR's" -Value "$reviewedCount" -Note "$reviewedApprovedCount approved" `
+        -DeltaHtml (New-DeltaHtml -Current $reviewedCount -Previous $previousSummary.reviewedCount -HigherIsBetter)),
+    (New-Tile -Label 'Work items completed' -Value "$totalWorkItemsCompleted" -Note "of $totalWorkItemsAssigned assigned" `
+        -DeltaHtml (New-DeltaHtml -Current $totalWorkItemsCompleted -Previous $previousSummary.totalWorkItemsCompleted -HigherIsBetter)),
+    (New-Tile -Label 'Avg work item age' -Value (Format-Metric $avgWorkItemAgeDays ' d') -Note $(if ($workItemsWithAgeData -gt 0) { "assigned to close, $workItemsWithAgeData item$(if ($workItemsWithAgeData -ne 1) {'s'})" } else { 'no assigned date on record' }) `
+        -DeltaHtml (New-DeltaHtml -Current $avgWorkItemAgeDays -Previous $previousSummary.avgWorkItemAgeDays -Suffix 'd')),
+    (New-Tile -Label 'Stuck in queue' -Value "$stuckInQueueCount" -Note "$staleBugCount Bug$(if ($staleBugCount -ne 1) {'s'}), $staleUserStoryCount User Stor$(if ($staleUserStoryCount -ne 1) {'ies'} else {'y'}) $StaleWorkItemDaysThreshold+ business days" `
+        -DeltaHtml (New-DeltaHtml -Current $stuckInQueueCount -Previous $previousSummary.stuckInQueueCount))
 ) -join "`n"
+
+# ---- "Needs attention" roll-up: every risk signal collected in one place, right
+# after the headline, so a Scrum Master/manager gets the "what should I ask
+# about" list on first glance instead of piecing it together from five tables
+# further down the page. ----
+$attentionItems = New-Object System.Collections.Generic.List[string]
+if ($stalePrCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'critical' `
+        -Html "<strong>$stalePrCount</strong> PR$(if ($stalePrCount -ne 1) {'s'}) stuck open $StalePrDaysThreshold+ business days" `
+        -Sub "out of $activePrCount currently active")) | Out-Null
+}
+if ($staleBugCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'critical' `
+        -Html "<strong>$staleBugCount</strong> Bug$(if ($staleBugCount -ne 1) {'s'}) sitting untouched $StaleWorkItemDaysThreshold+ business days" `
+        -Sub 'no state change recorded - see Stuck in queue below')) | Out-Null
+}
+if ($staleUserStoryCount -gt 0) {
+    $usWord = if ($staleUserStoryCount -eq 1) { 'User Story' } else { 'User Stories' }
+    $attentionItems.Add((New-AttentionItem -Severity 'critical' `
+        -Html "<strong>$staleUserStoryCount</strong> $usWord sitting untouched $StaleWorkItemDaysThreshold+ business days" `
+        -Sub 'no state change recorded - see Stuck in queue below')) | Out-Null
+}
+if ($abandonedCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$abandonedCount</strong> PR$(if ($abandonedCount -ne 1) {'s'}) abandoned this month")) | Out-Null
+}
+if ($noWorkItemCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$noWorkItemCount</strong> out of $totalRaised PR$(if ($totalRaised -ne 1) {'s'}) raised with no linked work item")) | Out-Null
+}
+if ($largePrCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$largePrCount</strong> out of $totalRaised PR$(if ($totalRaised -ne 1) {'s'}) flagged large / risky to review" `
+        -Sub "churn >= $LargeChurnThreshold lines or files >= $LargeFileCountThreshold")) | Out-Null
+}
+if ($vagueCommitCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$vagueCommitCount</strong> vague / non-descriptive commit message$(if ($vagueCommitCount -ne 1) {'s'})")) | Out-Null
+}
+$attentionSection = if ($attentionItems.Count -eq 0) {
+    '<div class="all-clear"><span class="dot"></span>No risk signals this month &mdash; PRs, bugs, and user stories are all moving.</div>'
+} else {
+    '<ul class="attention-list">' + ($attentionItems -join "`n") + '</ul>'
+}
+
+# ---- work items delivered: one coloured card per ADO type, matching the icon
+# colours in Azure DevOps itself. Epic/Feature "active" already accounts for the
+# no-user-stories-underneath gate applied in Get-WorkItemTypeStats. ----
+$wiStats = $workItemTypeStats
+$wiAgeCalloutHtml = if ($null -ne $avgWorkItemAgeDays) {
+    '<p class="callout callout-info"><strong>Avg work item age:</strong> ' + $avgWorkItemAgeDays +
+    ' business days from assignment to close (based on ' + $workItemsWithAgeData + ' completed item' +
+    $(if ($workItemsWithAgeData -ne 1) { 's' }) + ' with an assigned date on record).</p>'
+} else {
+    '<p class="callout callout-info"><strong>Avg work item age:</strong> n/a &mdash; no work items have an "assignedDate" on record yet.</p>'
+}
+$workItemCardsHtml = (@(
+    (New-WorkItemCard -Bucket 'Epic' -Count $wiStats['Epic'].count -ActiveCount $wiStats['Epic'].activeCount -CodeReviewCount 0 -CompletedCount $wiStats['Epic'].completedCount),
+    (New-WorkItemCard -Bucket 'Feature' -Count $wiStats['Feature'].count -ActiveCount $wiStats['Feature'].activeCount -CodeReviewCount 0 -CompletedCount $wiStats['Feature'].completedCount),
+    (New-WorkItemCard -Bucket 'User Story' -Count $wiStats['User Story'].count -ActiveCount $wiStats['User Story'].activeCount -CodeReviewCount $wiStats['User Story'].codeReviewCount -CompletedCount $wiStats['User Story'].completedCount -ShowCodeReview),
+    (New-WorkItemCard -Bucket 'Task' -Count $wiStats['Task'].count -ActiveCount $wiStats['Task'].activeCount -CodeReviewCount $wiStats['Task'].codeReviewCount -CompletedCount $wiStats['Task'].completedCount -ShowCodeReview),
+    (New-WorkItemCard -Bucket 'Bug' -Count $wiStats['Bug'].count -ActiveCount $wiStats['Bug'].activeCount -CodeReviewCount $wiStats['Bug'].codeReviewCount -CompletedCount $wiStats['Bug'].completedCount -ShowCodeReview)
+) -join "`n")
+
+# ---- stuck-in-queue: Bugs/User Stories assigned to this person with no state
+# change in StaleWorkItemDaysThreshold+ business days ----
+$staleQueueItems = @(
+    @($staleBugItems | ForEach-Object { [pscustomobject]@{ type = 'Bug'; id = $_.id; title = $_.title; state = $_.state; ageDays = $_.ageDays } }) +
+    @($staleUserStoryItems | ForEach-Object { [pscustomobject]@{ type = 'User Story'; id = $_.id; title = $_.title; state = $_.state; ageDays = $_.ageDays } })
+) | Sort-Object -Property ageDays -Descending
+$staleQueueRows = (@(foreach ($item in $staleQueueItems) {
+    '<tr><td>' + (New-TypeBadge $item.type) + '</td><td class="num">#' + $item.id + '</td>' +
+    '<td class="title">' + (ConvertTo-HtmlText $item.title) + '</td><td>' + (ConvertTo-HtmlText $item.state) + '</td>' +
+    '<td class="num">' + $item.ageDays + '</td></tr>'
+}) -join "`n")
+$staleQueueSection = if ($staleQueueItems.Count -eq 0) {
+    '<p class="empty">No Bugs or User Stories stuck in queue this month.</p>'
+} else {
+    '<div class="scroll"><table><thead><tr><th>Type</th><th>ID</th><th>Title</th><th>State</th><th>Business days untouched</th></tr></thead><tbody>' +
+    $staleQueueRows + '</tbody></table></div>'
+}
 
 # ---- grouped metric tables ----
 $hygieneRows = @(
-    (New-MetricRow 'Missing work item link' "$noWorkItemCount ($noWorkItemRatePercent%)" (New-DeltaHtml -Current $noWorkItemRatePercent -Previous $previousSummary.noWorkItemRatePercent -Suffix 'pp')),
-    (New-MetricRow 'Incomplete / stale description' "$descriptionFlagCount ($descriptionFlagRatePercent%)" (New-DeltaHtml -Current $descriptionFlagRatePercent -Previous $previousSummary.descriptionFlagRatePercent -Suffix 'pp')),
-    (New-MetricRow 'PRs with any comment flag' "$anyCommentFlagCount ($commentFlagRatePercent%)" (New-DeltaHtml -Current $commentFlagRatePercent -Previous $previousSummary.commentFlagRatePercent -Suffix 'pp')),
-    (New-MetricRow 'Abandoned PRs' "$abandonedCount ($abandonRatePercent%)" '')
+    (New-MetricRow 'Missing work item link' "$noWorkItemCount out of $totalRaised" (New-DeltaHtml -Current $noWorkItemCount -Previous $previousSummary.noWorkItemCount)),
+    (New-MetricRow 'Incomplete / stale description' "$descriptionFlagCount out of $totalRaised" (New-DeltaHtml -Current $descriptionFlagCount -Previous $previousSummary.descriptionFlagCount)),
+    (New-MetricRow 'PRs with any comment flag' "$anyCommentFlagCount out of $totalRaised" (New-DeltaHtml -Current $anyCommentFlagCount -Previous $previousSummary.anyCommentFlagCount)),
+    (New-MetricRow 'Abandoned PRs' "$abandonedCount out of $totalRaised" ''),
+    (New-MetricRow "Stuck active PRs (open >= $StalePrDaysThreshold business days)" "$stalePrCount out of $activePrCount" (New-DeltaHtml -Current $stalePrCount -Previous $previousSummary.stalePrCount))
 ) -join "`n"
 
 $sizeRows = @(
     (New-MetricRow 'Lines added / deleted' "+$totalLinesAdded / -$totalLinesDeleted" ''),
-    (New-MetricRow 'Files changed' "$totalFilesChanged" ''),
-    (New-MetricRow 'Avg churn per PR' "$avgChurnPerPr" (New-DeltaHtml -Current $avgChurnPerPr -Previous $previousSummary.avgChurnPerPr)),
-    (New-MetricRow "Large PRs (churn >= $LargeChurnThreshold or files >= $LargeFileCountThreshold)" "$largePrCount ($largePrRatePercent%)" (New-DeltaHtml -Current $largePrRatePercent -Previous $previousSummary.largePrRatePercent -Suffix 'pp'))
+    (New-MetricRow "Large PRs (churn >= $LargeChurnThreshold or files >= $LargeFileCountThreshold)" "$largePrCount out of $totalRaised" (New-DeltaHtml -Current $largePrCount -Previous $previousSummary.largePrCount))
 ) -join "`n"
 
-$govRows = @(
-    (New-MetricRow 'Author approved their own PR' "$selfApprovalCount ($selfApprovalRatePercent%)" (New-DeltaHtml -Current $selfApprovalRatePercent -Previous $previousSummary.selfApprovalRatePercent -Suffix 'pp')),
-    (New-MetricRow 'Merged to master with no approving reviewer' "$noApprovalMergedCount ($noApprovalMergedRatePercent% of merges)" (New-DeltaHtml -Current $noApprovalMergedRatePercent -Previous $previousSummary.noApprovalMergedRatePercent -Suffix 'pp'))
+$reviewingRows = @(
+    (New-MetricRow "PRs reviewed by $person" "$reviewedCount" (New-DeltaHtml -Current $reviewedCount -Previous $previousSummary.reviewedCount -HigherIsBetter)),
+    (New-MetricRow 'Of those, approved' "$reviewedApprovedCount" (New-DeltaHtml -Current $reviewedApprovedCount -Previous $previousSummary.reviewedApprovedCount))
 ) -join "`n"
 
 $commitRows = @(
@@ -604,6 +798,25 @@ $categoryRows = (@(foreach ($cat in $categoryTotals.Keys) {
     New-MetricRow $cat "$($categoryTotals[$cat])" ''
 }) -join "`n")
 
+# ---- confirmed talking points (written by the agent, per RUNBOOK Step 4) - parsed
+# early so the per-PR table below can show each PR's actionable vs general point
+# count right alongside its other numbers. ----
+$tpRaw = $null
+$tpParsed = $null
+if ($TalkingPointsPath -and (Test-Path $TalkingPointsPath)) {
+    $tpRaw = Get-Content -Raw -Encoding UTF8 -Path $TalkingPointsPath
+    $tpParsed = Get-TalkingPointsParsed -RawText $tpRaw
+}
+$prTalkingPointCounts = @{}
+if ($tpParsed) {
+    foreach ($s in $tpParsed.Sections) {
+        if ($null -eq $s.PullRequestId) { continue }
+        $actionable = @($s.Bullets | Where-Object { $_.Category -eq 'Actionable' }).Count
+        $general = @($s.Bullets | Where-Object { $_.Category -eq 'General' }).Count
+        $prTalkingPointCounts[$s.PullRequestId] = @{ Actionable = $actionable; General = $general }
+    }
+}
+
 # ---- per-PR table ----
 $prRows = (@(foreach ($pr in $prResults) {
     $titleText = ConvertTo-HtmlText $pr.title
@@ -612,24 +825,31 @@ $prRows = (@(foreach ($pr in $prResults) {
     if ($pr.descriptionFlag)      { $chips += (New-Chip 'warning'  'stale description') }
     if ($pr.noWorkItemFlag)       { $chips += (New-Chip 'warning'  'no work item') }
     if ($pr.largePrFlag)          { $chips += (New-Chip 'warning'  'large PR') }
+    if ($pr.stalePrFlag)          { $chips += (New-Chip 'critical' "stuck $($pr.ageDays)d open") }
     if ($pr.vagueCommitCount -gt 0) { $chips += (New-Chip 'serious' "$($pr.vagueCommitCount) vague commits") }
-    if ($pr.selfApprovalFlag)     { $chips += (New-Chip 'critical' 'self-approved') }
-    if ($pr.noApprovalMergedFlag) { $chips += (New-Chip 'critical' 'no approval') }
     # Flags ride under the title rather than in a far-right column: in a wide table
     # that column lands off-screen, which hides the one thing worth reading.
     $chipLine = if ($chips) { '<span class="chips">' + $chips + '</span>' } else { '' }
 
-    $cycle  = if ($null -ne $pr.cycleTimeHours) { "$($pr.cycleTimeHours)" } else { 'n/a' }
+    # Cycle time only exists for closed PRs; a still-open PR shows its age
+    # instead (days since creation, business days only) so it's obvious how
+    # long it's been sitting rather than a blank/misleading "n/a".
+    $cycle  = if ($null -ne $pr.cycleTimeDays) { "$($pr.cycleTimeDays)" } `
+              elseif ($pr.isActive -and $null -ne $pr.ageDays) { "$($pr.ageDays) (open)" } `
+              else { 'n/a' }
     $rework = if ($null -ne $pr.reworkCommitCount) { "$($pr.reworkCommitCount)" } else { 'n/a' }
     $merged = if ($pr.mergedToMaster) { 'yes' } else { 'no' }
+    $tpCounts = $prTalkingPointCounts[[int]$pr.pullRequestId]
+    $tpCell = if ($tpCounts) { "$($tpCounts.Actionable) / $($tpCounts.General)" } else { 'n/a' }
 
     '<tr>' +
     '<td class="num">' + $pr.pullRequestId + '</td>' +
     '<td class="title">' + $titleCell + '<span class="sub">' + (ConvertTo-HtmlText $pr.targetRefName) + '</span>' + $chipLine + '</td>' +
-    '<td>' + (ConvertTo-HtmlText $pr.status) + '</td>' +
+    '<td>' + (New-StatusPill $pr.status) + '</td>' +
     '<td>' + $merged + '</td>' +
     '<td class="num">' + $cycle + '</td>' +
     '<td class="num">' + $pr.commentCount + ' / ' + $pr.threadCount + '</td>' +
+    '<td class="num">' + $tpCell + '</td>' +
     '<td class="num">' + $pr.filesChangedCount + '</td>' +
     '<td class="num">+' + $pr.linesAdded + ' / -' + $pr.linesDeleted + '</td>' +
     '<td class="num">' + $pr.approvedCount + ' / ' + $pr.reviewersCount + '</td>' +
@@ -641,7 +861,10 @@ $prRows = (@(foreach ($pr in $prResults) {
 # ---- candidate comment flags ----
 $flagCards = (@(foreach ($pr in $prResults) {
     if ($pr.commentFlags.Count -eq 0) { continue }
-    $card = '<article class="card"><h3>PR #' + $pr.pullRequestId + ' &mdash; ' + (ConvertTo-HtmlText $pr.title) + '</h3><ul>'
+    $prHeading = if ($pr.url) {
+        '<a href="' + (ConvertTo-HtmlText $pr.url) + '" target="_blank" rel="noopener">#' + $pr.pullRequestId + '</a>'
+    } else { '#' + $pr.pullRequestId }
+    $card = '<article class="card"><h3>PR ' + $prHeading + ' &mdash; ' + (ConvertTo-HtmlText $pr.title) + '</h3><ul>'
     foreach ($hit in $pr.commentFlags) {
         $card += '<li><span class="cat">' + (ConvertTo-HtmlText $hit.category) + '</span>' +
                  '<blockquote>' + (ConvertTo-HtmlText $hit.snippet) + '</blockquote>' +
@@ -664,31 +887,40 @@ $vagueSection = if ($vagueCommitHits.Count -eq 0) {
     $vagueRows + '</tbody></table></div>'
 }
 
-# ---- governance flags ----
-$govFlags = (@(
-    foreach ($pr in $selfApprovalPrs) {
-        '<li>' + (New-Chip 'critical' 'self-approved') + ' PR #' + $pr.pullRequestId + ' &mdash; ' +
-        (ConvertTo-HtmlText $pr.title) + '. ' + (ConvertTo-HtmlText $person) +
-        ' appears among the reviewers with an approving vote on their own PR.</li>'
+# ---- PRs reviewed by this person (authored by someone else) ----
+$reviewedRows = (@(foreach ($rpr in $reviewedPullRequests) {
+    $titleText = ConvertTo-HtmlText $rpr.title
+    $titleCell = if ($rpr.url) { '<a href="' + (ConvertTo-HtmlText $rpr.url) + '">' + $titleText + '</a>' } else { $titleText }
+    $voteText = switch ([int]$rpr.vote) {
+        10  { 'Approved' }
+        5   { 'Approved with suggestions' }
+        0   { 'No vote' }
+        -5  { 'Waiting for author' }
+        -10 { 'Rejected' }
+        default { 'n/a' }
     }
-    foreach ($pr in $noApprovalPrs) {
-        '<li>' + (New-Chip 'critical' 'no approval') + ' PR #' + $pr.pullRequestId + ' &mdash; ' +
-        (ConvertTo-HtmlText $pr.title) + '. Merged to master with ' + $pr.reviewersCount +
-        ' reviewer(s) assigned but 0 approvals.</li>'
-    }
-) -join "`n")
-$govSection = if (-not $govFlags) {
-    '<p class="empty">No self-approval or no-approval-merge flags detected.</p>'
+    # Files/lines are optional on reviewedPullRequests - older raw data won't have
+    # them, so fall back to "n/a" rather than showing a misleading 0.
+    $rFiles = if ($null -ne $rpr.filesChangedCount) { "$($rpr.filesChangedCount)" } else { 'n/a' }
+    $rLines = if ($null -ne $rpr.linesAdded -or $null -ne $rpr.linesDeleted) {
+        $rAdded = if ($null -ne $rpr.linesAdded) { [int]$rpr.linesAdded } else { 0 }
+        $rDeleted = if ($null -ne $rpr.linesDeleted) { [int]$rpr.linesDeleted } else { 0 }
+        "+$rAdded / -$rDeleted"
+    } else { 'n/a' }
+    '<tr><td class="num">#' + $rpr.pullRequestId + '</td><td class="title">' + $titleCell + '</td>' +
+    '<td>' + (ConvertTo-HtmlText $rpr.author) + '</td><td>' + (ConvertTo-HtmlText $voteText) + '</td>' +
+    '<td class="num">' + $rFiles + '</td><td class="num">' + $rLines + '</td></tr>'
+}) -join "`n")
+$reviewedSection = if ($reviewedPullRequests.Count -eq 0) {
+    '<p class="empty">No reviewed-PR data supplied for this month.</p>'
 } else {
-    '<ul class="flag-list">' + $govFlags + '</ul>'
+    '<div class="scroll"><table><thead><tr><th>PR</th><th>Title</th><th>Author</th><th>Vote</th><th>Files</th><th>Lines</th></tr></thead><tbody>' +
+    $reviewedRows + '</tbody></table></div>'
 }
 
-# ---- confirmed talking points (written by the agent, per RUNBOOK Step 4) ----
-$talkingPoints = '<p class="empty">Not yet written. After the manual review pass (RUNBOOK.md Step 4), save the confirmed points to a text file and re-run with <code>-TalkingPointsPath</code>.</p>'
-if ($TalkingPointsPath -and (Test-Path $TalkingPointsPath)) {
-    $tpRaw = Get-Content -Raw -Path $TalkingPointsPath
-    $talkingPoints = '<pre class="talking-points">' + (ConvertTo-HtmlText $tpRaw) + '</pre>'
-}
+# ---- confirmed talking points HTML (parsing already done above, before the PR table) ----
+$talkingPoints = if ($tpRaw) { ConvertTo-TalkingPointsHtml $tpRaw } `
+    else { '<p class="empty">Not yet written. After the manual review pass (RUNBOOK.md Step 4), save the confirmed points to a text file and re-run with <code>-TalkingPointsPath</code>.</p>' }
 
 $trendNote = if ($previousSummary) {
     'Trends compare against ' + (ConvertTo-HtmlText "$($previousSummary.monthYear)") + ', the same person.'
@@ -697,6 +929,16 @@ $trendNote = if ($previousSummary) {
 }
 
 $generatedLocal = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+
+# ---- avatar initials for the profile header ----
+$nameTokens = @(($person -split '[@\.\s_]+') | Where-Object { $_ })
+$initials = if ($nameTokens.Count -ge 2) {
+    ($nameTokens[0].Substring(0, 1) + $nameTokens[1].Substring(0, 1)).ToUpperInvariant()
+} elseif ($nameTokens.Count -eq 1) {
+    $nameTokens[0].Substring(0, [Math]::Min(2, $nameTokens[0].Length)).ToUpperInvariant()
+} else {
+    '??'
+}
 
 # ---- the template. Colours are the validated data-viz reference palette:
 #      status hues are fixed and always ship with a glyph + word, never colour alone.
@@ -715,20 +957,15 @@ $htmlTemplate = @'
 <div class="wrap">
 
   <header class="report">
-    <p class="eyebrow">PR / KPI report</p>
-    <h1>{{PERSON}}</h1>
-    <p class="subject">{{MONTH}} &middot; pull requests raised in this month</p>
-    <p class="stamp">Generated {{GENERATED}} &middot; {{TREND_NOTE}}</p>
-  </header>
-
-  <div class="hero">
-    <p class="hero-value">{{SCORE}}</p>
-    <div>
-      <p class="hero-label">Composite quality score, out of 100</p>
-      {{SCORE_DELTA}}
+    <div class="avatar">{{INITIALS}}</div>
+    <div class="header-text">
+      <p class="eyebrow">PR / KPI report</p>
+      <h1>{{PERSON}}</h1>
+      <p class="period-badge">{{PERIOD_RANGE}}</p>
+      <p class="subject">Reporting period: <strong>{{MONTH_LABEL}}</strong> &middot; pull requests raised in this month</p>
+      <p class="stamp">Generated {{GENERATED}} &middot; {{TREND_NOTE}}</p>
     </div>
-    <p class="hero-note">A conversation starter, not a rating. The weights are one team's opinion and every input is gameable by anyone who knows the formula. Read the trend against this person's own last month; never rank two people with it.</p>
-  </div>
+  </header>
 
   <section>
     <h2>Headline</h2>
@@ -737,7 +974,39 @@ $htmlTemplate = @'
     </div>
   </section>
 
-  <section class="grid-2">
+  <section class="panel">
+    <h2>Needs attention</h2>
+    {{ATTENTION_SECTION}}
+  </section>
+
+  <section class="panel">
+    <h2>Work items delivered</h2>
+    <p class="callout callout-info">Epic/Feature only count as "Active" once at least one User Story exists under them &mdash; an Epic or Feature with no User Stories is not counted as active work.</p>
+    {{WI_AGE_CALLOUT}}
+    <div class="wi-grid">
+      {{WORK_ITEM_CARDS}}
+    </div>
+    <h3>Stuck in queue (Bug / User Story, no status change in {{STALE_WI_DAYS}}+ business days)</h3>
+    {{STALE_QUEUE_SECTION}}
+  </section>
+
+  <section class="panel">
+    <h2>Pull requests</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>PR</th><th>Title &amp; flags</th><th>Status</th><th>Merged</th><th>Cycle d / age</th>
+          <th>Comments / threads</th><th>Talking pts (action / note)</th><th>Files</th><th>Lines</th><th>Approvals</th>
+          <th>Commits</th><th>Rework</th>
+        </tr></thead>
+        <tbody>
+          {{PR_ROWS}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel grid-2">
     <div>
       <h2>PR hygiene</h2>
       <table class="metrics"><tbody>
@@ -751,9 +1020,9 @@ $htmlTemplate = @'
       </tbody></table>
     </div>
     <div>
-      <h2>Review governance</h2>
+      <h2>Reviewing others' work</h2>
       <table class="metrics"><tbody>
-        {{GOV_ROWS}}
+        {{REVIEWING_ROWS}}
       </tbody></table>
     </div>
     <div>
@@ -764,51 +1033,37 @@ $htmlTemplate = @'
     </div>
   </section>
 
-  <section>
-    <h2>Pull requests</h2>
-    <div class="scroll">
-      <table>
-        <thead><tr>
-          <th>PR</th><th>Title &amp; flags</th><th>Status</th><th>Merged</th><th>Cycle h</th>
-          <th>Comments / threads</th><th>Files</th><th>Lines</th><th>Approvals</th>
-          <th>Commits</th><th>Rework</th>
-        </tr></thead>
-        <tbody>
-          {{PR_ROWS}}
-        </tbody>
-      </table>
-    </div>
+  <section class="panel">
+    <h2>PRs reviewed by {{PERSON}}</h2>
+    {{REVIEWED_SECTION}}
   </section>
 
-  <section>
+  <section class="panel">
     <h2>Confirmed talking points</h2>
     {{TALKING_POINTS}}
   </section>
 
-  <section>
-    <h2>Candidate flags &mdash; not yet confirmed</h2>
-    <p class="callout">Everything below this line is keyword matching, not judgment. Read each one in its original context before raising it: a comment saying "add a null check" may be a recurring blind spot or a one-off on genuinely subtle code, and the script cannot tell those apart. Discard the false positives before the meeting.</p>
+  <details class="appendix">
+    <summary>Candidate flags &mdash; not yet confirmed, keyword matches only</summary>
+    <section>
+      <p class="callout">Everything below this line is keyword matching, not judgment. Read each one in its original context before raising it: a comment saying "add a null check" may be a recurring blind spot or a one-off on genuinely subtle code, and the script cannot tell those apart. Discard the false positives before the meeting.</p>
 
-    <h3>Review comments</h3>
-    {{FLAG_CARDS}}
+      <h3>Review comments</h3>
+      {{FLAG_CARDS}}
 
-    <h3>Vague / non-descriptive commit messages</h3>
-    {{VAGUE_SECTION}}
+      <h3>Vague / non-descriptive commit messages</h3>
+      {{VAGUE_SECTION}}
 
-    <h3>Self-approval and no-approval merges</h3>
-    {{GOV_SECTION}}
-  </section>
-
-  <section>
-    <h2>Comment-flag categories</h2>
-    <table class="metrics"><tbody>
-      {{CATEGORY_ROWS}}
-    </tbody></table>
-  </section>
+      <h3>Comment-flag categories</h3>
+      <table class="metrics"><tbody>
+        {{CATEGORY_ROWS}}
+      </tbody></table>
+    </section>
+  </details>
 
   <footer class="report">
     <p><strong>Scope.</strong> This covers pull requests only. Mentoring, design work, on-call, incident response, and whether the person was working on the right thing at all are invisible here. A month with 3 PRs says nothing on its own.</p>
-    <p><strong>Thresholds used.</strong> Large PR at churn &ge; {{LARGE_CHURN}} lines or &ge; {{LARGE_FILES}} files. Description flagged under {{DESC_MIN}} characters. Commit subject flagged as vague under {{VAGUE_MIN}} characters or matching the known-phrase list.</p>
+    <p><strong>Thresholds used.</strong> Large PR at churn &ge; {{LARGE_CHURN}} lines or &ge; {{LARGE_FILES}} files. Description flagged under {{DESC_MIN}} characters. Commit subject flagged as vague under {{VAGUE_MIN}} characters or matching the known-phrase list. Active PR flagged "stuck" at &ge; {{STALE_DAYS}} business days open. Bug/User Story flagged "stuck in queue" at &ge; {{STALE_WI_DAYS}} business days with no status change.</p>
     <p><strong>Handling.</strong> Contains real review comments about an identifiable person. Keep it out of shared drives and version control, and show the report to the person it describes.</p>
   </footer>
 
@@ -820,26 +1075,33 @@ $htmlTemplate = @'
 $html = $htmlTemplate.
     Replace('{{STYLE}}',         (Get-KpiReportCss)).
     Replace('{{PERSON}}',        (ConvertTo-HtmlText $person)).
+    Replace('{{INITIALS}}',      (ConvertTo-HtmlText $initials)).
     Replace('{{MONTH}}',         (ConvertTo-HtmlText $monthYear)).
+    Replace('{{MONTH_LABEL}}',   (ConvertTo-HtmlText $monthLabel)).
+    Replace('{{PERIOD_RANGE}}',  (ConvertTo-HtmlText $periodRangeLabel)).
     Replace('{{GENERATED}}',     (ConvertTo-HtmlText $generatedLocal)).
     Replace('{{TREND_NOTE}}',    $trendNote).
-    Replace('{{SCORE}}',         "$qualityScore").
-    Replace('{{SCORE_DELTA}}',   (New-DeltaHtml -Current $qualityScore -Previous $previousSummary.qualityScore -HigherIsBetter)).
     Replace('{{TILES}}',         $tiles).
+    Replace('{{ATTENTION_SECTION}}', $attentionSection).
+    Replace('{{WORK_ITEM_CARDS}}', $workItemCardsHtml).
+    Replace('{{WI_AGE_CALLOUT}}', $wiAgeCalloutHtml).
+    Replace('{{STALE_QUEUE_SECTION}}', $staleQueueSection).
     Replace('{{HYGIENE_ROWS}}',  $hygieneRows).
     Replace('{{SIZE_ROWS}}',     $sizeRows).
-    Replace('{{GOV_ROWS}}',      $govRows).
+    Replace('{{REVIEWING_ROWS}}', $reviewingRows).
     Replace('{{COMMIT_ROWS}}',   $commitRows).
     Replace('{{PR_ROWS}}',       $prRows).
+    Replace('{{REVIEWED_SECTION}}', $reviewedSection).
     Replace('{{TALKING_POINTS}}', $talkingPoints).
     Replace('{{FLAG_CARDS}}',    $flagCards).
     Replace('{{VAGUE_SECTION}}', $vagueSection).
-    Replace('{{GOV_SECTION}}',   $govSection).
     Replace('{{CATEGORY_ROWS}}', $categoryRows).
     Replace('{{LARGE_CHURN}}',   "$LargeChurnThreshold").
     Replace('{{LARGE_FILES}}',   "$LargeFileCountThreshold").
     Replace('{{DESC_MIN}}',      "$DescriptionMinLength").
-    Replace('{{VAGUE_MIN}}',     "$VagueCommitMinLength")
+    Replace('{{VAGUE_MIN}}',     "$VagueCommitMinLength").
+    Replace('{{STALE_DAYS}}',    "$StalePrDaysThreshold").
+    Replace('{{STALE_WI_DAYS}}', "$StaleWorkItemDaysThreshold")
 
 $html | Set-Content -Path $htmlPath -Encoding UTF8
 
@@ -847,4 +1109,5 @@ Write-Host "HTML report:  $htmlPath"
 Write-Host "PR CSV:       $prsCsvPath"
 Write-Host "Ledger CSV:   $ledgerPath"
 Write-Host "Summary JSON: $summaryPath"
-Write-Host ("PRs raised: {0}, Merged to master: {1} ({2}%), Quality score: {3}" -f $totalRaised, $mergedToMaster, $summary.mergeRatePercent, $qualityScore)
+Write-Host ("PRs raised: {0}, Merged to master: {1} ({2}%), Reviewed for others: {3}, Work items assigned: {4} ({5} completed)" -f `
+    $totalRaised, $mergedToMaster, $summary.mergeRatePercent, $reviewedCount, $totalWorkItemsAssigned, $totalWorkItemsCompleted)
