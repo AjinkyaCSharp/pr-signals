@@ -31,8 +31,8 @@ never be asked to judge tone.
    ┌────────────────────────────┐
    │ Get-TeamKpiReport.ps1      │           <- 100% deterministic
    │  counts, rates, medians,   │              same input = same numbers,
-   │  trends, quality score,    │              no model, no network, no PAT
-   │  heuristic candidate flags │
+   │  trends, heuristic         │              no model, no network, no PAT
+   │  candidate flags           │
    └─────────┬──────────────────┘
              │ 4. emit
              v
@@ -70,31 +70,14 @@ the agent's existing, already-authorized ADO connection — no PAT to mint, rota
 | Group | Metrics |
 |---|---|
 | **Throughput** | PRs raised, merged to master, merge rate, abandon rate |
-| **Speed** | Avg + median cycle time (creation → close), in hours |
-| **Review engagement** | Review threads, thread-resolution rate, comment volume per PR, distinct reviewers engaged |
-| **PR hygiene** | Missing work-item link, incomplete/stale description |
-| **Size & risk** | Files changed, lines added/deleted, avg churn per PR, large-PR flags (churn ≥ 400 or files ≥ 15, both tunable) |
-| **Governance** | Author self-approval detection, merged-to-master-with-zero-approvals detection |
+| **Speed** | Avg + median cycle time (creation → close), in business days (Mon-Fri only; weekend time excluded) |
+| **Review engagement** | Comment volume per PR, distinct reviewers engaged, PRs reviewed by this person for others (with approval count) |
+| **PR hygiene** | Missing work-item link, incomplete/stale description, stuck active PRs (open ≥ 5 business days, tunable) |
+| **Size & risk** | Lines added/deleted, large-PR flags (churn ≥ 400 or files ≥ 15, both tunable) |
 | **Commit hygiene** | Vague commit-message detection (`wip`, `fixed pr comments`, `.`, …), rework commits landed after the first review comment |
 | **Comment patterns** | Candidate flags across naming convention, null checks, misleading description, stale/TODO comments |
-| **Composite** | 0-100 quality score, plus automatic month-over-month trend deltas once two months exist |
-
-### The composite score
-
-```
-score = 0.35 × merge rate
-      + 0.25 × thread-resolution rate
-      + 0.25 × hygiene   (100 − mean of: no-work-item, stale-description,
-      +                    comment-flag, large-PR and vague-commit rates)
-      + 0.15 × governance (100 − 2×self-approval rate − no-approval-merge rate)
-```
-
-Self-approval is weighted double because it is a process red flag, not a style nit.
-
-**Treat this number as a conversation starter, never as a rating.** It is arbitrary by
-construction — the weights are one person's opinion, and every input is gameable by
-anyone who knows the formula. It is in the report so that a *trend* is visible, not so
-that two people can be ranked against each other.
+| **Work items** | Total work items assigned this month, broken down by Bug / User Story / Task / Epic / Feature / Other, each with a completed-vs-assigned count |
+| **Trends** | Automatic month-over-month trend deltas once two months exist |
 
 ---
 
@@ -119,7 +102,7 @@ HTML report:  .\kpi-reports\jane.doe@example.com-2025-07.html
 PR CSV:       .\kpi-reports\jane.doe@example.com-2025-07-prs.csv
 Ledger CSV:   .\kpi-reports\kpi-ledger.csv
 Summary JSON: .\kpi-reports\jane.doe@example.com-2025-07-summary.json
-PRs raised: 3, Merged to master: 2 (66.7%), Quality score: 57.8
+PRs raised: 3, Merged to master: 2 (66.7%), Reviewed for others: 2, Work items assigned: 5 (3 completed)
 ```
 
 ### The three outputs
@@ -177,16 +160,31 @@ so collect once, then slice the same months as a month, a quarter and a year.
 
 ### What the team report adds
 
-- **Team performance** — delivery, review culture, PR and commit hygiene, and
-  governance risk, each with a delta against the *previous equal-length period*
-  (a quarter compares to the quarter before it)
+- **Team performance** — delivery, review culture, and PR and commit hygiene,
+  each with a delta against the *previous equal-length period*
+  (a quarter compares to the quarter before it), plus the same headline tiles
+  as the individual report (active PRs, high-cycle-time PRs, avg work item age,
+  stuck-in-queue), pooled across the whole team
+- **Needs attention** — every risk signal (stuck PRs, stale Bugs/User Stories,
+  abandoned PRs, missing work items, large PRs, vague commits) rolled up in one
+  place, so a scrum master gets the "what should I ask about" list on first
+  glance instead of piecing it together from five tables
+- **Work items delivered** — colored per-type cards (Epic/Feature/User
+  Story/Task/Bug) with Active/Code review/Completed breakdowns, summed across
+  every member, plus a team-wide **stuck in queue** table (pooled stale Bugs
+  and User Stories with a Person column, oldest first)
+- **Team trends over the period** — month-over-month bar charts (pure CSS, no
+  chart library) for PRs created/merged/abandoned and work items
+  assigned-vs-completed per type, so a scrum master can see whether delivery
+  is improving or degrading across the months in a quarter/half-year/year.
+  Only shown when the period covers more than one month
+- **Work items assigned** — team totals by Bug / User Story / Task / Epic /
+  Feature / Other, each with a completed-vs-assigned count
 - **Workload spread** — lowest / median / highest PRs per member, and the share
   held by the busiest member. This is a planning signal: it answers "is everything
   concentrated in one person, and what happens when they're away", not "who is best"
 - **Per member** — one row each, listed **alphabetically on purpose**; sorting it
   by PR count would make it a ranking, and PR counts track ticket sizing
-- **Governance flags across the team** — every self-approval and no-approval merge
-  in one table, which is a process problem to fix rather than a person to blame
 - **Coverage** — member-months with no collected data, counted as *missing* rather
   than as zero, because "raised no PRs" and "we never fetched it" are different facts
 

@@ -3,14 +3,15 @@
 This tool helps produce monthly, data-backed PR metrics for 1-1s: PRs raised, PRs
 merged to `master`, flagged review-comment patterns (missing work item, stale
 description, null-check nitpicks, naming-convention comments, misleading description,
-etc.), plus deeper quantitative signals — PR cycle time (avg/median hours from
-creation to close), review-thread resolution rate, comment volume and reviewer
-diversity, PR size/churn (files/lines changed, large-PR flags), reviewer
-self-approval and no-approval-merge detection, commit hygiene (vague/non-descriptive
-commit message detection, rework-commit counts after the first review comment),
-per-category flag-rate percentages, a composite 0-100 quality score, and automatic
-month-over-month trend deltas (once two or more months exist in the same
-`kpi-reports` folder) — for a given teammate + month.
+etc.), plus deeper quantitative signals — PR cycle time (avg/median business days
+from creation to close, Mon-Fri only), comment volume and reviewer diversity, PRs
+reviewed by this person for others, PR size/churn (files/lines changed, large-PR
+flags), commit hygiene (vague/non-descriptive commit message detection,
+rework-commit counts after the first review comment), per-category flag-rate
+percentages, work items assigned by type (Bug/User Story/Task/Epic/Feature/Other)
+with completed-vs-assigned counts, and automatic month-over-month trend deltas
+(once two or more months exist in the same `kpi-reports` folder) — for a given
+teammate + month.
 
 ## What's in this folder
 
@@ -73,7 +74,7 @@ So the real workflow each month is:
    PR CSV:       .\kpi-reports\jane.doe@example.com-2025-07-prs.csv
    Ledger CSV:   .\kpi-reports\kpi-ledger.csv
    Summary JSON: .\kpi-reports\jane.doe@example.com-2025-07-summary.json
-   PRs raised: 3, Merged to master: 2 (66.7%), Quality score: 57.8
+   PRs raised: 3, Merged to master: 2 (66.7%), Reviewed for others: 2, Work items assigned: 5 (3 completed)
    ```
    Open the HTML file in a browser — that's the one you bring to the meeting.
    If that works, the script side is good to go.
@@ -106,9 +107,11 @@ Copilot CLI will then:
 - Pull full PR details (description, linked work items, target branch, status,
   reviewers + vote), all comment threads (with timestamps), file-change/line-churn
   summaries, and commits (author + message) for each PR.
+- List PRs authored by others where this person appears as a reviewer, and work
+  items assigned to this person during the month (with type and state).
 - Save the collected data as `kpi-raw/<email>-<month-year>.json`.
 - Run `Get-TeamKpiReport.ps1` against it to get the KPI counts, size/churn, commit
-  hygiene, and self-approval metrics, plus heuristic flags.
+  hygiene, reviewing-others, and work-item metrics, plus heuristic flags.
 - Manually read the flagged/candidate comments and commit messages, and produce a
   final "Confirmed talking points" section with reviewer quotes and links, appended
   into the HTML report via `-TalkingPointsPath` — this last step needs the AI's
@@ -124,15 +127,14 @@ record keeping.
 - No data leaves your machine except normal ADO API calls that Copilot CLI already
   makes on your behalf — nothing is sent to third parties beyond that.
 - `kpi-raw/*.json` and `kpi-reports/*` contain real PR/comment text and per-person
-  scores for teammates. Both folders are in `.gitignore` for exactly that reason —
+  metrics for teammates. Both folders are in `.gitignore` for exactly that reason —
   keep them there, and treat the contents like any other performance-review-adjacent
   data (never push them anywhere public, never share outside the team). See the
   "Scope and limits" section of `README.md` before running this on a colleague.
 - The categories `Get-TeamKpiReport.ps1` heuristically pre-tags (naming convention,
-  null check, misleading description, stale/incomplete comment, vague commit message,
-  self-approval, no-approval-merge) are just a first pass — expect most real flags to
-  come from Copilot CLI's manual read-through of comments and commits, not the
-  script's keyword/pattern matches.
+  null check, misleading description, stale/incomplete comment, vague commit message)
+  are just a first pass — expect most real flags to come from Copilot CLI's manual
+  read-through of comments and commits, not the script's keyword/pattern matches.
 - To adjust what counts as "raised" or "merged to master" (e.g. a different branch
   name), edit the `-InputJsonPath`/`targetMasterBranch` field in the JSON, or ask
   Copilot CLI to scope it to a different repo/branch.

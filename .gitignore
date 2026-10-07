@@ -2,7 +2,7 @@
 # NEVER COMMIT REAL DATA.
 #
 # kpi-raw/    holds fetched PR bodies, review comments and author identities.
-# kpi-reports/ holds per-person metrics and quality scores.
+# kpi-reports/ holds per-person metrics.
 #
 # Both are performance-review-adjacent data about identifiable colleagues, and
 # both are ignored wholesale. Synthetic, publishable examples live in samples/.
