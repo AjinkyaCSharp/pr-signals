@@ -679,6 +679,28 @@ function Get-KpiReportCss {
   }
   .type-badge .wi-swatch { width: 10px; height: 10px; }
 
+  /* ---- month-over-month trend bars: pure CSS, no chart library, so the
+     report stays one self-contained HTML file. ---- */
+  .bar-chart { margin-bottom: 26px; }
+  .bar-chart:last-child { margin-bottom: 0; }
+  .bar-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+  .bar-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .bar-swatch { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+  .bar-chart-body {
+    display: flex; align-items: flex-end; gap: 18px; min-height: 160px;
+    padding: 10px 6px 0; border-bottom: 2px solid var(--baseline); overflow-x: auto;
+  }
+  .bar-col { display: flex; flex-direction: column; align-items: center; flex: 1 0 56px; }
+  .bar-group { display: flex; align-items: flex-end; gap: 4px; height: 140px; width: 100%; justify-content: center; }
+  .bar {
+    width: 16px; min-height: 2px; border-radius: 3px 3px 0 0; position: relative;
+    display: flex; align-items: flex-start; justify-content: center;
+  }
+  .bar-value {
+    position: absolute; top: -18px; font-size: 11px; font-weight: 650; color: var(--ink-2); white-space: nowrap;
+  }
+  .bar-month { margin-top: 8px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   .scroll { overflow-x: auto; }
   th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--grid); vertical-align: top; }

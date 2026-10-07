@@ -162,7 +162,22 @@ so collect once, then slice the same months as a month, a quarter and a year.
 
 - **Team performance** — delivery, review culture, and PR and commit hygiene,
   each with a delta against the *previous equal-length period*
-  (a quarter compares to the quarter before it)
+  (a quarter compares to the quarter before it), plus the same headline tiles
+  as the individual report (active PRs, high-cycle-time PRs, avg work item age,
+  stuck-in-queue), pooled across the whole team
+- **Needs attention** — every risk signal (stuck PRs, stale Bugs/User Stories,
+  abandoned PRs, missing work items, large PRs, vague commits) rolled up in one
+  place, so a scrum master gets the "what should I ask about" list on first
+  glance instead of piecing it together from five tables
+- **Work items delivered** — colored per-type cards (Epic/Feature/User
+  Story/Task/Bug) with Active/Code review/Completed breakdowns, summed across
+  every member, plus a team-wide **stuck in queue** table (pooled stale Bugs
+  and User Stories with a Person column, oldest first)
+- **Team trends over the period** — month-over-month bar charts (pure CSS, no
+  chart library) for PRs created/merged/abandoned and work items
+  assigned-vs-completed per type, so a scrum master can see whether delivery
+  is improving or degrading across the months in a quarter/half-year/year.
+  Only shown when the period covers more than one month
 - **Work items assigned** — team totals by Bug / User Story / Task / Epic /
   Feature / Other, each with a completed-vs-assigned count
 - **Workload spread** — lowest / median / highest PRs per member, and the share

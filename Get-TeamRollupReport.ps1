@@ -44,6 +44,19 @@
 .PARAMETER SkipMemberReports
     Don't re-run the per-person script; only aggregate the summary JSON already present.
 
+.PARAMETER StalePrDaysThreshold
+    Business days a PR can stay active before it counts as stuck. Label text only here -
+    the actual flag is computed per-person by Get-TeamKpiReport.ps1 and pooled from its
+    summary JSON, so keep this in sync with that script's value. Default 5.
+
+.PARAMETER HighCycleTimeDaysThreshold
+    Business days threshold for the "PRs with high cycle time" tile label. Same caveat as
+    StalePrDaysThreshold - pooled counts come from the per-person summaries. Default 10.
+
+.PARAMETER StaleWorkItemDaysThreshold
+    Business days threshold for the "Stuck in queue" tile label. Same caveat as
+    StalePrDaysThreshold. Default 5.
+
 .OUTPUTS
     <team>-<period>-team.html      the team report to present
     <team>-<period>-members.csv    one row per member per month
@@ -76,7 +89,13 @@ param(
 
     [int]$LargeChurnThreshold = 400,
 
-    [int]$LargeFileCountThreshold = 15
+    [int]$LargeFileCountThreshold = 15,
+
+    [int]$StalePrDaysThreshold = 5,
+
+    [int]$HighCycleTimeDaysThreshold = 10,
+
+    [int]$StaleWorkItemDaysThreshold = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -201,7 +220,36 @@ function Get-TeamAggregate {
     # take them from the member summaries directly.
     $reviewedTotal = 0; $reviewedApprovedTotal = 0
     $workItemsAssignedTotal = 0; $workItemsCompletedTotal = 0
+    $activePrCountTotal = 0; $stalePrCountTotal = 0; $highCycleTimePrCountTotal = 0
+    $staleBugCountTotal = 0; $staleUserStoryCountTotal = 0; $stuckInQueueCountTotal = 0
+    $workItemAgeWeightedSum = 0.0; $workItemsWithAgeDataTotal = 0
     $workItemBucketTotals = [ordered]@{}
+    # Richer per-type stats (count/active/code-review/completed) for the colored
+    # work-item-type cards - same shape New-WorkItemCard expects in the individual
+    # report, just summed across every member instead of one person.
+    $workItemTypeStatsTotals = [ordered]@{}
+    foreach ($bucket in @('Epic', 'Feature', 'User Story', 'Task', 'Bug')) {
+        $workItemTypeStatsTotals[$bucket] = [ordered]@{ count = 0; activeCount = 0; codeReviewCount = 0; completedCount = 0 }
+    }
+    # Pooled stuck-in-queue items across the whole team, each tagged with who
+    # it's assigned to - the team-level equivalent of the individual report's
+    # "Stuck in queue" table, just with a Person column added.
+    $staleQueueItems = New-Object System.Collections.Generic.List[object]
+    # Per-month team rollup - PRs raised/merged/abandoned and work items
+    # assigned/completed per bucket, one row per month in the period - feeds the
+    # "Team trends over the period" bar charts. Each member-month summary.json
+    # is already scoped to exactly one month, so this is a straight re-key of
+    # data already being read above, not a new data source.
+    $monthlyStats = [ordered]@{}
+    foreach ($month in $Months) {
+        $monthlyStats[$month] = [ordered]@{
+            prRaised = 0; prMerged = 0; prAbandoned = 0
+            workItems = [ordered]@{}
+        }
+        foreach ($bucket in @('Epic', 'Feature', 'User Story', 'Task', 'Bug')) {
+            $monthlyStats[$month].workItems[$bucket] = [ordered]@{ assigned = 0; completed = 0 }
+        }
+    }
     foreach ($member in $Members) {
         $safeEmail = Get-SafeName $member.email
         foreach ($month in $Months) {
@@ -212,6 +260,16 @@ function Get-TeamAggregate {
             $reviewedApprovedTotal += [int]$s.reviewedApprovedCount
             $workItemsAssignedTotal += [int]$s.totalWorkItemsAssigned
             $workItemsCompletedTotal += [int]$s.totalWorkItemsCompleted
+            $activePrCountTotal += [int]$s.activePrCount
+            $stalePrCountTotal += [int]$s.stalePrCount
+            $highCycleTimePrCountTotal += [int]$s.highCycleTimePrCount
+            $staleBugCountTotal += [int]$s.staleBugCount
+            $staleUserStoryCountTotal += [int]$s.staleUserStoryCount
+            $stuckInQueueCountTotal += [int]$s.stuckInQueueCount
+            if ($null -ne $s.avgWorkItemAgeDays -and [int]$s.workItemsWithAgeData -gt 0) {
+                $workItemAgeWeightedSum += [double]$s.avgWorkItemAgeDays * [int]$s.workItemsWithAgeData
+                $workItemsWithAgeDataTotal += [int]$s.workItemsWithAgeData
+            }
             if ($s.workItemSummary) {
                 foreach ($prop in $s.workItemSummary.PSObject.Properties) {
                     if (-not $workItemBucketTotals.Contains($prop.Name)) {
@@ -219,10 +277,43 @@ function Get-TeamAggregate {
                     }
                     $workItemBucketTotals[$prop.Name].assigned += [int]$prop.Value.assigned
                     $workItemBucketTotals[$prop.Name].completed += [int]$prop.Value.completed
+                    if ($monthlyStats.Contains($month) -and $monthlyStats[$month].workItems.Contains($prop.Name)) {
+                        $monthlyStats[$month].workItems[$prop.Name].assigned += [int]$prop.Value.assigned
+                        $monthlyStats[$month].workItems[$prop.Name].completed += [int]$prop.Value.completed
+                    }
                 }
+            }
+            if ($s.workItemTypeStats) {
+                foreach ($prop in $s.workItemTypeStats.PSObject.Properties) {
+                    if (-not $workItemTypeStatsTotals.Contains($prop.Name)) { continue }
+                    $workItemTypeStatsTotals[$prop.Name].count += [int]$prop.Value.count
+                    $workItemTypeStatsTotals[$prop.Name].activeCount += [int]$prop.Value.activeCount
+                    $workItemTypeStatsTotals[$prop.Name].codeReviewCount += [int]$prop.Value.codeReviewCount
+                    $workItemTypeStatsTotals[$prop.Name].completedCount += [int]$prop.Value.completedCount
+                }
+            }
+            foreach ($item in @($s.staleBugItems)) {
+                if ($null -eq $item) { continue }
+                $staleQueueItems.Add([pscustomobject]@{
+                    person = $s.person; displayName = $member.displayName; type = 'Bug'
+                    id = $item.id; title = $item.title; state = $item.state; ageDays = $item.ageDays
+                }) | Out-Null
+            }
+            foreach ($item in @($s.staleUserStoryItems)) {
+                if ($null -eq $item) { continue }
+                $staleQueueItems.Add([pscustomobject]@{
+                    person = $s.person; displayName = $member.displayName; type = 'User Story'
+                    id = $item.id; title = $item.title; state = $item.state; ageDays = $item.ageDays
+                }) | Out-Null
+            }
+            if ($monthlyStats.Contains($month)) {
+                $monthlyStats[$month].prRaised += [int]$s.totalRaised
+                $monthlyStats[$month].prMerged += [int]$s.mergedToMaster
+                $monthlyStats[$month].prAbandoned += [int]$s.abandonedCount
             }
         }
     }
+    $staleQueueItems = @($staleQueueItems | Sort-Object -Property ageDays -Descending)
 
     $pct = { param($n, $d) if ($d -gt 0) { [math]::Round(100 * $n / $d, 1) } else { 0 } }
 
@@ -259,6 +350,7 @@ function Get-TeamAggregate {
         noWorkItemRatePercent   = $noWorkItemRate
         descriptionFlagCount    = $descFlag
         descriptionFlagRatePercent = $descFlagRate
+        commentFlagCount        = $flagged
         commentFlagRatePercent  = $commentFlagRate
         totalLinesAdded         = $added
         totalLinesDeleted       = $deleted
@@ -274,6 +366,17 @@ function Get-TeamAggregate {
         totalWorkItemsAssigned  = $workItemsAssignedTotal
         totalWorkItemsCompleted = $workItemsCompletedTotal
         workItemBucketTotals    = $workItemBucketTotals
+        workItemTypeStatsTotals = $workItemTypeStatsTotals
+        staleQueueItems         = $staleQueueItems
+        monthlyStats            = $monthlyStats
+        activePrCount           = $activePrCountTotal
+        stalePrCount            = $stalePrCountTotal
+        highCycleTimePrCount    = $highCycleTimePrCountTotal
+        staleBugCount           = $staleBugCountTotal
+        staleUserStoryCount     = $staleUserStoryCountTotal
+        stuckInQueueCount       = $stuckInQueueCountTotal
+        avgWorkItemAgeDays      = if ($workItemsWithAgeDataTotal -gt 0) { [math]::Round($workItemAgeWeightedSum / $workItemsWithAgeDataTotal, 1) } else { $null }
+        workItemsWithAgeData    = $workItemsWithAgeDataTotal
         prsPerMemberMax         = $busiest
         prsPerMemberMin         = $quietest
         prsPerMemberMedian      = Get-Median -Values @($counts | ForEach-Object { [double]$_ })
@@ -337,10 +440,12 @@ $ledgerColumns = @(
     'memberCount', 'contributorCount', 'totalRaised', 'mergedToMaster', 'mergeRatePercent',
     'abandonedCount', 'abandonRatePercent', 'avgCycleTimeDays', 'medianCycleTimeDays',
     'totalComments', 'avgCommentsPerPr',
-    'noWorkItemRatePercent', 'descriptionFlagRatePercent', 'commentFlagRatePercent',
+    'noWorkItemRatePercent', 'descriptionFlagRatePercent', 'commentFlagCount', 'commentFlagRatePercent',
     'totalLinesAdded', 'totalLinesDeleted', 'avgChurnPerPr', 'largePrCount', 'largePrRatePercent',
     'totalCommits', 'vagueCommitCount', 'vagueCommitRatePercent',
     'reviewedCount', 'reviewedApprovedCount', 'totalWorkItemsAssigned', 'totalWorkItemsCompleted',
+    'activePrCount', 'stalePrCount', 'highCycleTimePrCount',
+    'staleBugCount', 'staleUserStoryCount', 'stuckInQueueCount', 'avgWorkItemAgeDays', 'workItemsWithAgeData',
     'prsPerMemberMin', 'prsPerMemberMedian', 'prsPerMemberMax', 'busiestSharePercent', 'coverageGaps'
 )
 $ledgerRow = [pscustomobject][ordered]@{}
@@ -376,36 +481,163 @@ $tiles = @(
         -DeltaHtml (New-DeltaHtml -Current $agg.totalRaised -Previous $prev.totalRaised -HigherIsBetter -PeriodLabel $cmp)),
     (New-Tile -Label 'Merged to master' -Value "$($agg.mergedToMaster)" -Note "$($agg.mergeRatePercent)% of PRs raised" `
         -DeltaHtml (New-DeltaHtml -Current $agg.mergeRatePercent -Previous $prev.mergeRatePercent -HigherIsBetter -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-Tile -Label "Active PR's" -Value "$($agg.activePrCount)" -Note $(if ($agg.stalePrCount -gt 0) { "$($agg.stalePrCount) stuck $StalePrDaysThreshold+ business days" } else { 'none stuck open' }) `
+        -DeltaHtml (New-DeltaHtml -Current $agg.activePrCount -Previous $prev.activePrCount -PeriodLabel $cmp)),
     (New-Tile -Label 'Median cycle time' -Value (Format-Metric $agg.medianCycleTimeDays ' d') -Note (Format-Metric $agg.avgCycleTimeDays ' d average') `
         -DeltaHtml (New-DeltaHtml -Current $agg.medianCycleTimeDays -Previous $prev.medianCycleTimeDays -Suffix 'd' -PeriodLabel $cmp)),
+    (New-Tile -Label "PR's with high cycle time" -Value "$($agg.highCycleTimePrCount)" -Note "> $HighCycleTimeDaysThreshold business days (open or closed)" `
+        -DeltaHtml (New-DeltaHtml -Current $agg.highCycleTimePrCount -Previous $prev.highCycleTimePrCount -PeriodLabel $cmp)),
     (New-Tile -Label 'Review comments' -Value "$($agg.totalComments)" -Note "avg $($agg.avgCommentsPerPr) per PR" `
         -DeltaHtml (New-DeltaHtml -Current $agg.avgCommentsPerPr -Previous $prev.avgCommentsPerPr -Suffix '/PR' -PeriodLabel $cmp)),
     (New-Tile -Label 'PRs reviewed' -Value "$($agg.reviewedCount)" -Note "$($agg.reviewedApprovedCount) approved" `
         -DeltaHtml (New-DeltaHtml -Current $agg.reviewedCount -Previous $prev.reviewedCount -HigherIsBetter -PeriodLabel $cmp)),
     (New-Tile -Label 'Work items assigned' -Value "$($agg.totalWorkItemsAssigned)" -Note "$($agg.totalWorkItemsCompleted) completed" `
-        -DeltaHtml (New-DeltaHtml -Current $agg.totalWorkItemsAssigned -Previous $prev.totalWorkItemsAssigned -PeriodLabel $cmp))
+        -DeltaHtml (New-DeltaHtml -Current $agg.totalWorkItemsAssigned -Previous $prev.totalWorkItemsAssigned -PeriodLabel $cmp)),
+    (New-Tile -Label 'Avg work item age' -Value (Format-Metric $agg.avgWorkItemAgeDays ' d') -Note $(if ($agg.workItemsWithAgeData -gt 0) { "assigned to close, $($agg.workItemsWithAgeData) items" } else { 'no assigned date on record' }) `
+        -DeltaHtml (New-DeltaHtml -Current $agg.avgWorkItemAgeDays -Previous $prev.avgWorkItemAgeDays -Suffix 'd' -PeriodLabel $cmp)),
+    (New-Tile -Label 'Stuck in queue' -Value "$($agg.stuckInQueueCount)" -Note "$($agg.staleBugCount) Bugs, $($agg.staleUserStoryCount) User Stories $StaleWorkItemDaysThreshold+ business days" `
+        -DeltaHtml (New-DeltaHtml -Current $agg.stuckInQueueCount -Previous $prev.stuckInQueueCount -PeriodLabel $cmp))
 ) -join "`n"
+
+# ---- "Needs attention" roll-up: team-level equivalent of the individual
+# report's risk list, built entirely from the pooled counts already computed
+# above - no new data, just the same signals surfaced in one place instead of
+# five tables further down the page. ----
+$attentionItems = New-Object System.Collections.Generic.List[string]
+if ($agg.stalePrCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'critical' `
+        -Html "<strong>$($agg.stalePrCount)</strong> PR$(if ($agg.stalePrCount -ne 1) {'s'}) stuck open $StalePrDaysThreshold+ business days" `
+        -Sub "out of $($agg.activePrCount) currently active across the team")) | Out-Null
+}
+if ($agg.staleBugCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'critical' `
+        -Html "<strong>$($agg.staleBugCount)</strong> Bug$(if ($agg.staleBugCount -ne 1) {'s'}) sitting untouched $StaleWorkItemDaysThreshold+ business days" `
+        -Sub 'no state change recorded - see Stuck in queue below')) | Out-Null
+}
+if ($agg.staleUserStoryCount -gt 0) {
+    $usWord = if ($agg.staleUserStoryCount -eq 1) { 'User Story' } else { 'User Stories' }
+    $attentionItems.Add((New-AttentionItem -Severity 'critical' `
+        -Html "<strong>$($agg.staleUserStoryCount)</strong> $usWord sitting untouched $StaleWorkItemDaysThreshold+ business days" `
+        -Sub 'no state change recorded - see Stuck in queue below')) | Out-Null
+}
+if ($agg.abandonedCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$($agg.abandonedCount)</strong> PR$(if ($agg.abandonedCount -ne 1) {'s'}) abandoned across the team this period")) | Out-Null
+}
+if ($agg.noWorkItemCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$($agg.noWorkItemCount)</strong> out of $($agg.totalRaised) PR$(if ($agg.totalRaised -ne 1) {'s'}) raised with no linked work item")) | Out-Null
+}
+if ($agg.largePrCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$($agg.largePrCount)</strong> out of $($agg.totalRaised) PR$(if ($agg.totalRaised -ne 1) {'s'}) flagged large / risky to review")) | Out-Null
+}
+if ($agg.vagueCommitCount -gt 0) {
+    $attentionItems.Add((New-AttentionItem -Severity 'warning' `
+        -Html "<strong>$($agg.vagueCommitCount)</strong> vague / non-descriptive commit message$(if ($agg.vagueCommitCount -ne 1) {'s'}) across the team")) | Out-Null
+}
+$attentionSection = if ($attentionItems.Count -eq 0) {
+    '<div class="all-clear"><span class="dot"></span>No risk signals this period &mdash; PRs, bugs, and user stories are all moving across the team.</div>'
+} else {
+    '<ul class="attention-list">' + ($attentionItems -join "`n") + '</ul>'
+}
+
+# ---- work-item-type cards: same colored-card styling as the individual
+# report, summed across the whole team for the period. ----
+$wiStats = $agg.workItemTypeStatsTotals
+$workItemCardsHtml = (@(
+    (New-WorkItemCard -Bucket 'Epic' -Count $wiStats['Epic'].count -ActiveCount $wiStats['Epic'].activeCount -CodeReviewCount 0 -CompletedCount $wiStats['Epic'].completedCount),
+    (New-WorkItemCard -Bucket 'Feature' -Count $wiStats['Feature'].count -ActiveCount $wiStats['Feature'].activeCount -CodeReviewCount 0 -CompletedCount $wiStats['Feature'].completedCount),
+    (New-WorkItemCard -Bucket 'User Story' -Count $wiStats['User Story'].count -ActiveCount $wiStats['User Story'].activeCount -CodeReviewCount $wiStats['User Story'].codeReviewCount -CompletedCount $wiStats['User Story'].completedCount -ShowCodeReview),
+    (New-WorkItemCard -Bucket 'Task' -Count $wiStats['Task'].count -ActiveCount $wiStats['Task'].activeCount -CodeReviewCount $wiStats['Task'].codeReviewCount -CompletedCount $wiStats['Task'].completedCount -ShowCodeReview),
+    (New-WorkItemCard -Bucket 'Bug' -Count $wiStats['Bug'].count -ActiveCount $wiStats['Bug'].activeCount -CodeReviewCount $wiStats['Bug'].codeReviewCount -CompletedCount $wiStats['Bug'].completedCount -ShowCodeReview)
+) -join "`n")
+
+# ---- team-wide stuck-in-queue table: every member's stale Bug/User Story
+# items pooled together with a Person column, sorted oldest-first. Items
+# already come pre-sorted by age from Get-TeamAggregate. ----
+$staleQueueRows = (@(foreach ($item in $agg.staleQueueItems) {
+    $personLabel = if ($item.displayName) { $item.displayName } else { $item.person }
+    '<tr><td>' + (ConvertTo-HtmlText $personLabel) + '</td><td>' + (New-TypeBadge $item.type) + '</td><td class="num">#' + $item.id + '</td>' +
+    '<td class="title">' + (ConvertTo-HtmlText $item.title) + '</td><td>' + (ConvertTo-HtmlText $item.state) + '</td>' +
+    '<td class="num">' + $item.ageDays + '</td></tr>'
+}) -join "`n")
+$staleQueueSection = if ($agg.staleQueueItems.Count -eq 0) {
+    '<p class="empty">No Bugs or User Stories stuck in queue across the team this period.</p>'
+} else {
+    '<div class="scroll"><table><thead><tr><th>Person</th><th>Type</th><th>ID</th><th>Title</th><th>State</th><th>Business days untouched</th></tr></thead><tbody>' +
+    $staleQueueRows + '</tbody></table></div>'
+}
+
+# ---- month-over-month trend bar charts: pure CSS bars, no chart library, so
+# the report stays a single self-contained HTML file. Only meaningful once the
+# period covers more than one month; for -Period month there's nothing to
+# trend against, so the section is replaced with a short note instead. ----
+function New-TrendBarGroup {
+    param([string]$Title, [hashtable[]]$Series, [string[]]$Months)
+    # $Series is an array of @{ Label; Color; Values = @(per-month numbers) }
+    $allValues = @($Series | ForEach-Object { $_.Values }) | Where-Object { $null -ne $_ }
+    $max = if ($allValues.Count -gt 0) { [math]::Max(1, ($allValues | Measure-Object -Maximum).Maximum) } else { 1 }
+    $legend = (@($Series | ForEach-Object {
+        '<span class="bar-legend-item"><span class="bar-swatch" style="background:' + $_.Color + '"></span>' + (ConvertTo-HtmlText $_.Label) + '</span>'
+    }) -join '')
+    $columns = (@(for ($i = 0; $i -lt $Months.Count; $i++) {
+        $bars = (@($Series | ForEach-Object {
+            $v = [double]$_.Values[$i]
+            $pct = [math]::Round((100 * $v / $max), 1)
+            '<div class="bar" style="height:' + $pct + '%; background:' + $_.Color + '" title="' + (ConvertTo-HtmlText "$($_.Label): $v") + '"><span class="bar-value">' + $v + '</span></div>'
+        }) -join '')
+        '<div class="bar-col"><div class="bar-group">' + $bars + '</div><span class="bar-month">' + (ConvertTo-HtmlText $Months[$i]) + '</span></div>'
+    }) -join "`n")
+    return '<div class="bar-chart"><h3>' + (ConvertTo-HtmlText $Title) + '</h3><div class="bar-legend">' + $legend + '</div>' +
+           '<div class="bar-chart-body">' + $columns + '</div></div>'
+}
+
+$trendChartsHtml = if ($months.Count -le 1) {
+    '<p class="empty">Trend charts need more than one month in the period to show a trend. Run with <code>-Period quarter</code> (or wider) to see them.</p>'
+} else {
+    $prSeries = @(
+        @{ Label = 'Raised';    Color = 'var(--accent)'; Values = @($months | ForEach-Object { $agg.monthlyStats[$_].prRaised }) },
+        @{ Label = 'Merged';    Color = 'var(--good)';   Values = @($months | ForEach-Object { $agg.monthlyStats[$_].prMerged }) },
+        @{ Label = 'Abandoned'; Color = 'var(--muted)';  Values = @($months | ForEach-Object { $agg.monthlyStats[$_].prAbandoned }) }
+    )
+    $prChart = New-TrendBarGroup -Title 'PRs created, merged & abandoned' -Series $prSeries -Months $months
+
+    $workItemCharts = (@(foreach ($bucket in @('User Story', 'Bug', 'Task', 'Feature', 'Epic')) {
+        $assigned = @($months | ForEach-Object { $agg.monthlyStats[$_].workItems[$bucket].assigned })
+        $completed = @($months | ForEach-Object { $agg.monthlyStats[$_].workItems[$bucket].completed })
+        if ((($assigned | Measure-Object -Sum).Sum -eq 0) -and (($completed | Measure-Object -Sum).Sum -eq 0)) { continue }
+        $series = @(
+            @{ Label = 'Assigned';  Color = 'var(--accent)'; Values = $assigned },
+            @{ Label = 'Completed'; Color = 'var(--good)';   Values = $completed }
+        )
+        New-TrendBarGroup -Title "$bucket - assigned vs completed" -Series $series -Months $months
+    }) -join "`n")
+
+    $prChart + "`n" + $workItemCharts
+}
 
 $deliveryRows = @(
     (New-MetricRow 'PRs raised' "$($agg.totalRaised)" (New-DeltaHtml -Current $agg.totalRaised -Previous $prev.totalRaised -HigherIsBetter -PeriodLabel $cmp)),
     (New-MetricRow 'Merged to master' "$($agg.mergedToMaster) ($($agg.mergeRatePercent)%)" (New-DeltaHtml -Current $agg.mergeRatePercent -Previous $prev.mergeRatePercent -HigherIsBetter -Suffix 'pp' -PeriodLabel $cmp)),
-    (New-MetricRow 'Abandoned' "$($agg.abandonedCount) ($($agg.abandonRatePercent)%)" (New-DeltaHtml -Current $agg.abandonRatePercent -Previous $prev.abandonRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow 'Abandoned' "$($agg.abandonedCount) out of $($agg.totalRaised)" (New-DeltaHtml -Current $agg.abandonRatePercent -Previous $prev.abandonRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
     (New-MetricRow 'Avg cycle time' (Format-Metric $agg.avgCycleTimeDays ' d') (New-DeltaHtml -Current $agg.avgCycleTimeDays -Previous $prev.avgCycleTimeDays -Suffix 'd' -PeriodLabel $cmp))
 ) -join "`n"
 
 $reviewRows = @(
     (New-MetricRow 'Comments per PR' "$($agg.avgCommentsPerPr)" (New-DeltaHtml -Current $agg.avgCommentsPerPr -Previous $prev.avgCommentsPerPr -Suffix '/PR' -PeriodLabel $cmp)),
-    (New-MetricRow 'PRs with a comment flag' "$($agg.commentFlagRatePercent)%" (New-DeltaHtml -Current $agg.commentFlagRatePercent -Previous $prev.commentFlagRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow 'PRs with a comment flag' "$($agg.commentFlagCount) out of $($agg.totalRaised)" (New-DeltaHtml -Current $agg.commentFlagRatePercent -Previous $prev.commentFlagRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
     (New-MetricRow 'PRs reviewed by team members (for others)' "$($agg.reviewedCount)" (New-DeltaHtml -Current $agg.reviewedCount -Previous $prev.reviewedCount -HigherIsBetter -PeriodLabel $cmp)),
     (New-MetricRow 'Of those, approved' "$($agg.reviewedApprovedCount)" (New-DeltaHtml -Current $agg.reviewedApprovedCount -Previous $prev.reviewedApprovedCount -PeriodLabel $cmp))
 ) -join "`n"
 
 $hygieneRows = @(
-    (New-MetricRow 'Missing work item link' "$($agg.noWorkItemCount) ($($agg.noWorkItemRatePercent)%)" (New-DeltaHtml -Current $agg.noWorkItemRatePercent -Previous $prev.noWorkItemRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
-    (New-MetricRow 'Incomplete / stale description' "$($agg.descriptionFlagCount) ($($agg.descriptionFlagRatePercent)%)" (New-DeltaHtml -Current $agg.descriptionFlagRatePercent -Previous $prev.descriptionFlagRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
-    (New-MetricRow 'Large / risky-to-review PRs' "$($agg.largePrCount) ($($agg.largePrRatePercent)%)" (New-DeltaHtml -Current $agg.largePrRatePercent -Previous $prev.largePrRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow 'Missing work item link' "$($agg.noWorkItemCount) out of $($agg.totalRaised)" (New-DeltaHtml -Current $agg.noWorkItemRatePercent -Previous $prev.noWorkItemRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow 'Incomplete / stale description' "$($agg.descriptionFlagCount) out of $($agg.totalRaised)" (New-DeltaHtml -Current $agg.descriptionFlagRatePercent -Previous $prev.descriptionFlagRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow 'Large / risky-to-review PRs' "$($agg.largePrCount) out of $($agg.totalRaised)" (New-DeltaHtml -Current $agg.largePrRatePercent -Previous $prev.largePrRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
     (New-MetricRow 'Avg churn per PR' "$($agg.avgChurnPerPr)" (New-DeltaHtml -Current $agg.avgChurnPerPr -Previous $prev.avgChurnPerPr -PeriodLabel $cmp)),
-    (New-MetricRow 'Vague commit messages' "$($agg.vagueCommitCount) of $($agg.totalCommits) ($($agg.vagueCommitRatePercent)%)" (New-DeltaHtml -Current $agg.vagueCommitRatePercent -Previous $prev.vagueCommitRatePercent -Suffix 'pp' -PeriodLabel $cmp))
+    (New-MetricRow 'Vague commit messages' "$($agg.vagueCommitCount) of $($agg.totalCommits) ($($agg.vagueCommitRatePercent)%)" (New-DeltaHtml -Current $agg.vagueCommitRatePercent -Previous $prev.vagueCommitRatePercent -Suffix 'pp' -PeriodLabel $cmp)),
+    (New-MetricRow "Stuck active PRs (open >= $StalePrDaysThreshold business days)" "$($agg.stalePrCount) out of $($agg.activePrCount)" (New-DeltaHtml -Current $agg.stalePrCount -Previous $prev.stalePrCount -PeriodLabel $cmp))
 ) -join "`n"
 
 $workItemRows = (@(foreach ($bucket in $agg.workItemBucketTotals.Keys) {
@@ -503,6 +735,11 @@ $htmlTemplate = @'
     </div>
   </section>
 
+  <section class="panel">
+    <h2>Needs attention</h2>
+    {{ATTENTION_SECTION}}
+  </section>
+
   <section class="grid-2">
     <div>
       <h2>Delivery</h2>
@@ -520,6 +757,22 @@ $htmlTemplate = @'
       <h2>Work items assigned</h2>
       <table class="metrics"><tbody>{{WORK_ITEM_ROWS}}</tbody></table>
     </div>
+  </section>
+
+  <section class="panel">
+    <h2>Work items delivered</h2>
+    <p class="callout callout-info">Summed across every member for the period. Epic/Feature only count as "Active" once at least one User Story exists under them.</p>
+    <div class="wi-grid">
+      {{WORK_ITEM_CARDS}}
+    </div>
+    <h3>Stuck in queue (Bug / User Story, no status change in {{STALE_WI_DAYS}}+ business days)</h3>
+    {{STALE_QUEUE_SECTION}}
+  </section>
+
+  <section class="panel">
+    <h2>Team trends over the period</h2>
+    <p class="callout callout-info">One bar group per month covered by this period &mdash; use it to see whether delivery and hygiene are improving or degrading across the quarter, not to compare members against each other.</p>
+    {{TREND_CHARTS}}
   </section>
 
   <section>
@@ -567,10 +820,15 @@ $html = $htmlTemplate.
     Replace('{{GENERATED}}',     (ConvertTo-HtmlText ((Get-Date).ToString('yyyy-MM-dd HH:mm')))).
     Replace('{{TREND_NOTE}}',    (ConvertTo-HtmlText $trendNote)).
     Replace('{{TILES}}',         $tiles).
+    Replace('{{ATTENTION_SECTION}}', $attentionSection).
     Replace('{{DELIVERY_ROWS}}', $deliveryRows).
     Replace('{{REVIEW_ROWS}}',   $reviewRows).
     Replace('{{HYGIENE_ROWS}}',  $hygieneRows).
     Replace('{{WORK_ITEM_ROWS}}', $workItemRows).
+    Replace('{{WORK_ITEM_CARDS}}', $workItemCardsHtml).
+    Replace('{{STALE_QUEUE_SECTION}}', $staleQueueSection).
+    Replace('{{STALE_WI_DAYS}}', "$StaleWorkItemDaysThreshold").
+    Replace('{{TREND_CHARTS}}', $trendChartsHtml).
     Replace('{{DIST_ROWS}}',     $distRows).
     Replace('{{MEMBER_ROWS}}',   $memberTableRows).
     Replace('{{GAPS}}',          $gapSection)
